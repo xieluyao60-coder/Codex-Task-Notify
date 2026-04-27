@@ -27,6 +27,7 @@ state.json
 
 # Internal handoff notes
 docs/internal/
+docs/internal/vscode-marketplace-secrets.md
 AGENT_HANDOFF.md
 
 # OS / editor noise

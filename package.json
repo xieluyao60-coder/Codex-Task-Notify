@@ -1,9 +1,10 @@
 {
-  "name": "codex-task-notify",
-  "displayName": "Codex Task Notify",
+  "name": "agent-task-notify",
+  "displayName": "Agent Task Notify",
   "description": "Unified task completion notifications for Codex sessions across IDE, CLI, and app workflows.",
   "version": "1.4.0",
-  "publisher": "local",
+  "publisher": "ayanami-ray",
+  "icon": "assets/icons/icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -51,6 +52,7 @@
     "node_modules/shellwords/**",
     "node_modules/uuid/**",
     "node_modules/which/**",
+    "assets/**",vsce publish
     "README.md",
     "LICENSE"
   ],
