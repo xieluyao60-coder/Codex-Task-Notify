@@ -1,155 +1,166 @@
 # Codex Task Notify
 
-Codex Task Notify 是一个面向 Codex 长耗时任务的本地通知系统。它监听 Codex 写入的 session `.jsonl` 文件，在检测到 `task_complete` 事件后，把“任务完成”消息分发到 VS Code 弹窗、Windows 桌面通知和 Bark 手机推送。
+把 Codex 任务丢出去，然后放心去做别的事。
 
-这个项目的目标很明确：当多个 Codex 任务在多个窗口并发执行时，不需要反复人工检查窗口，而是在任务完成时主动通知用户。
+Codex Task Notify 是一个面向 Codex 长耗时任务的本地通知工具。它会监听 Codex 在本机写入的 session 文件，一旦检测到任务完成，就立即通过 VS Code 弹窗、Windows 桌面通知或 Bark iPhone 推送提醒你。
 
-## 功能概览
+它解决的是一个很具体的问题：Codex 任务经常需要跑很久，尤其是多个任务并发执行时，你不应该一直盯着窗口、反复切回来确认结果。启动 Codex Task Notify 后，你可以继续写代码、最小化 VS Code、切到其他窗口，甚至去刷手机；任务完成时它会主动提醒你。
 
-- 监听 `~/.codex/sessions` 下的 Codex session JSONL 文件。
-- 识别 `task_complete` 事件并提取 thread 名称、任务状态、耗时、摘要等信息。
-- 支持 VS Code 扩展和 CLI daemon 两种启动方式。
-- 支持 VS Code 内置弹窗、Windows 桌面 toast、Bark iPhone 推送。
-- 支持 Bark AES-256-GCM 加密推送、铃声、分组、角标、通知保存、自定义图标。
-- 支持手动将指定 `.jsonl` session 加入热查询队列。
-- 支持持久化 thread 重命名，通知优先使用用户自定义名称。
-- 支持查看热查询队列和最近一周手动加入热查询的 session。
-- VS Code 扩展提供状态栏按钮，降低命令面板使用成本。
+## 适合什么场景
 
-## 当前架构
+你可以用三种方式把任务交给 Codex：
 
-核心逻辑位于 `src/shared`，CLI 和 VS Code 扩展共用同一套 runtime。
+| 使用路径 | 适合场景 | 推荐通知方式 |
+| --- | --- | --- |
+| IDE 扩展 | 主要在 VS Code / IDE 中使用 Codex，希望整个过程自动化 | VS Code 内置弹窗 + Windows 桌面通知 |
+| CLI | 用终端跑 Codex，或希望以 daemon 方式长期监视 | Windows 桌面通知 + Bark |
+| Codex 桌面版 | 把任务交给 Codex 桌面版后切走做别的事 | Windows 桌面通知 + Bark |
 
-当前监视策略是冷热队列加归档发现器：
+支持三条通知路径：
 
-1. 启动时扫描 `sessionsRoot` 和同级的 `archived_sessions`，把未归档 session 写入冷查询队列，并把归档状态持久化到 state。
-2. 使用 `fs.watch` 监视当天日期的 session 目录；当天有新 `.jsonl` 文件出现时，立即加入热查询队列。
-3. 为避免单次 create/change 事件被遗漏，当天目录还会在事件触发后做一次短延迟补扫，并按热查询周期持续轻量补扫。
-4. 使用 `fs.watch` 监视 `archived_sessions`；发现归档文件后，把对应 session 从冷热队列移除，并更新归档索引。
-5. 冷查询队列默认每 `30000ms` 检查一次未归档文件的大小和修改时间；发生变化时，将其加入热查询队列。
-6. 热查询队列默认每 `5000ms` 检查一次文件变化；只有文件发生变化时，才继续读取 JSONL 并解析 `task_complete`。
-7. 已通知过的事件会写入本地 state，避免重复通知。
+| 通知路径 | 适合场景 |
+| --- | --- |
+| VS Code 内置消息弹窗 | 你还在 VS Code 中工作，或者同时开了多个 Codex 任务，需要知道哪个 thread 完成了。 |
+| Windows 桌面通知 | 你把 VS Code 最小化，或者切到浏览器、文档、其他软件继续工作。 |
+| Bark iPhone 推送 | 你离开电脑，或者真的想去刷抖音、看手机。 |
 
-历史测试中，单纯依赖文件系统 change 事件在 Windows 上存在随机高延迟，所以当前版本保留了热查询兜底机制。
+## 核心亮点
 
-## 项目结构
+- **与 Codex 上层入口解耦**：只依赖本机底层 session `.jsonl` 文件，不依赖 Codex CLI、IDE 扩展或桌面版的 UI 状态，也不和个人账号绑定。
+- **稳定可靠**：只要 Codex 正常把 session 写到本机，通知系统就能基于文件变化检测任务完成。
+- **低延迟**：任务完成后通常 1 秒内触发通知。
+- **低开销**：在保持低延迟的同时，监视内核开销接近 0。
+- **无感使用**：作为 VS Code 扩展使用时，会自动选择和监视 thread，用户几乎不需要手动干预。
+- **配置简单**：默认配置即可使用；不开手机推送时，基本无需额外配置。
 
-```text
-.
-├─ assets/icons/           # 项目图标和 Bark 推送图标素材
-├─ docs/internal/          # 本地交接文档，默认不提交
-├─ releases/vsix/          # 已打包的 VS Code 扩展包
-├─ scripts/                # 打包脚本
-├─ src/
-│  ├─ daemon.ts            # CLI daemon 入口
-│  ├─ extension.ts         # VS Code 扩展入口
-│  ├─ latencyProbe.ts      # 延迟探测工具
-│  ├─ shared/              # 共享 runtime、配置、通知、Bark、watcher
-│  └─ test/smoke.ts        # smoke test
-├─ tools/                  # 调试/追踪脚本
-├─ .env.example            # 环境变量模板
-├─ package.json
-└─ tsconfig.json
-```
+## 当前限制
 
-## 安装依赖
+- 当前主要支持 **Windows**。
+- 手机推送当前按 **iPhone + Bark** 方案设计。
+- Android、macOS、Linux 暂未作为主要支持目标。
 
-```powershell
-npm install
-```
+## 快速开始
 
-构建：
+### 方式一：VS Code 扩展使用，推荐
 
-```powershell
-npm run build
-```
+这是最推荐的方式。适合你在 VS Code 或其他基于 VS Code 的 IDE 中使用 Codex。
 
-运行 smoke test：
-
-```powershell
-npm run smoke
-```
-
-## 配置方式
-
-程序默认会读取共享配置文件：
-
-```text
-%USERPROFILE%\.codex-task-notify\config.json
-```
-
-同时也支持 `.env` 覆盖敏感配置。仓库只提交 `.env.example`，真实 `.env` 已加入 `.gitignore`，不要提交。
-
-创建本地 `.env`：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-常用环境变量：
-
-```dotenv
-CODEX_TASK_NOTIFY_SESSIONS_ROOT=C:\Users\YOUR_NAME\.codex\sessions
-CODEX_TASK_NOTIFY_STATE_FILE_PATH=C:\Users\YOUR_NAME\.codex-task-notify\state.json
-CODEX_TASK_NOTIFY_COLD_POLL_INTERVAL_MS=30000
-CODEX_TASK_NOTIFY_HOT_POLL_INTERVAL_MS=5000
-CODEX_TASK_NOTIFY_HOT_SESSION_IDLE_MS=7200000
-
-CODEX_TASK_NOTIFY_DESKTOP_ENABLED=true
-CODEX_TASK_NOTIFY_DESKTOP_SOUND=false
-
-CODEX_TASK_NOTIFY_BARK_ENABLED=false
-CODEX_TASK_NOTIFY_BARK_SERVER_URL=https://api.day.app
-CODEX_TASK_NOTIFY_BARK_DEVICE_KEY=your-bark-device-key
-CODEX_TASK_NOTIFY_BARK_SOUND=multiwayinvitation
-CODEX_TASK_NOTIFY_BARK_ARCHIVE=true
-CODEX_TASK_NOTIFY_BARK_ICON_URL=https://example.com/icon.png
-CODEX_TASK_NOTIFY_BARK_ENCRYPTION_ENABLED=true
-CODEX_TASK_NOTIFY_BARK_ENCRYPTION_KEY=12345678901234567890123456789012
-CODEX_TASK_NOTIFY_BARK_ENCRYPTION_IV=123456789012
-```
-
-`.env` 的优先级高于 `config.json`。如果设置了 `CODEX_TASK_NOTIFY_ENV`，程序会优先从该路径读取环境变量文件。
-
-兼容性说明：
-
-- 当前版本会自动兼容“整份 `.env` 被误压成一行”的情况，只要键名仍然是 `CODEX_TASK_NOTIFY_*=`，加载器会在启动时自动拆回多行。
-- 如果扩展启动后完全没有任何通知，优先检查 `.env` 是否损坏，以及 `Codex Task Notify` 输出面板里是否有 watcher 启动日志。
-
-## CLI 使用
-
-启动 daemon：
-
-```powershell
-npm run start:daemon
-```
-
-启动后可在终端输入以下命令：
-
-```text
-restart    关闭并重新开始监视
-stop       停止监视
-continue   继续开始监视
-quit       退出程序
-add        添加需要热查询监视的 .jsonl 文件
-rename     给 thread 重新命名
-clear_name 清除所有 thread 重命名
-show       展示当前热查询队列
-show_last  展示最近一周手动加入热查询的 session
-help       列出所有可用命令
-```
-
-`add` 支持直接输入 `.jsonl` 路径。加入后，该 session 会进入热查询队列。
-
-## VS Code 扩展使用
-
-扩展激活后会创建输出面板：
+1. 打开 VS Code。
+2. 进入左侧 **Extensions / 扩展** 面板。
+3. 搜索：
 
 ```text
 Codex Task Notify
 ```
 
-扩展命令：
+4. 点击安装。
+5. 安装后扩展会自动启动监视。
+6. 之后你可以正常把任务交给 Codex，然后切去做其他事情。
+
+如果你使用的是本地 `.vsix` 包，也可以通过 VS Code 命令面板安装：
+
+```text
+Extensions: Install from VSIX...
+```
+
+然后选择 `releases/vsix/` 目录下的 `codex-task-notify-*.vsix` 文件。
+
+### 方式二：CLI daemon 使用
+
+适合你主要用命令行，或者希望单独开一个后台监视进程。
+
+先安装依赖并启动 daemon：
+
+```powershell
+npm install
+npm run start:daemon
+```
+
+启动后，CLI 会开始监视 Codex session 目录。你可以继续在其他终端、IDE 或 Codex 桌面版中运行任务。
+
+常用交互命令：
+
+```text
+restart     重启监视
+stop        暂停监视
+continue    继续监视
+quit        退出程序
+add         手动添加一个 .jsonl session 文件到热监视队列
+rename      给 thread 设置自定义名称
+clear_name  清除所有自定义 thread 名称
+show        查看当前热监视队列
+show_last   查看最近 7 天手动添加过的 session
+help        查看命令帮助
+```
+
+`add` 适合在自动识别不够明确时使用。输入 `.jsonl` 文件路径后，该 session 会立即进入热监视队列。
+
+### 方式三：配合 Codex 桌面版使用
+
+Codex Task Notify 不需要接入 Codex 桌面版 UI。只要 Codex 桌面版把任务 session 写入本机 `.codex/sessions` 目录，本工具就可以从底层 session 文件识别任务完成事件。
+
+推荐做法：
+
+1. 先启动 VS Code 扩展或 CLI daemon。
+2. 在 Codex 桌面版中提交任务。
+3. 直接切去做其他事情。
+4. 任务完成后，通过 Windows 桌面通知或 Bark iPhone 推送收到提醒。
+
+## 三种通知方式怎么配置
+
+### 1. VS Code 内置消息弹窗
+
+VS Code 弹窗只在使用扩展模式时生效。默认开启。
+
+扩展安装后，它会在 VS Code 中弹出 Codex 任务完成消息。这个方式最适合你仍然在 VS Code 里写代码，或者打开了多个 Codex 任务并发执行的情况。
+
+可以在 VS Code 设置中搜索：
+
+```text
+Codex Task Notify
+```
+
+常用设置：
+
+| 设置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `codexTaskNotify.autoStart` | `true` | VS Code 启动后自动开始监视。 |
+| `codexTaskNotify.enableIdePopup` | `true` | 是否显示 VS Code 内置弹窗。 |
+| `codexTaskNotify.promptForSessionAlias` | `true` | 新 thread 完成时，是否提示给 thread 起一个自定义名称。 |
+| `codexTaskNotify.maxRecentEvents` | `20` | 最近通知事件保留数量。 |
+
+#### 两个交互按键
+
+当一个新的 Codex thread 第一次完成时，扩展会弹出命名提示：
+
+```text
+New Codex thread: xxx
+```
+
+你会看到两个交互按键：
+
+| 按键 | 用途 |
+| --- | --- |
+| `Rename` | 给这个 thread 起一个更容易识别的名字，之后通知会优先使用这个名字。 |
+| `Keep Auto Name` | 保留自动识别出的 thread 名称，不手动命名。 |
+
+这对多任务并发很有用。比如你同时让 Codex 修 bug、写 README、跑测试，手动命名后通知会更清楚。
+
+#### 状态栏按钮
+
+扩展会在 VS Code 状态栏提供几个快捷按钮：
+
+| 按钮 | 作用 |
+| --- | --- |
+| `Codex Start` / `Codex On` | 开始或继续监视。 |
+| `Codex Pause` / `Codex Stopped` | 暂停监视。 |
+| `Watch Current` | 监视当前打开的 `.jsonl` 文件；如果当前没有打开 `.jsonl`，会尝试选择最近写入的 Codex session。 |
+| `Choose Session` | 从最近 session 列表中手动选择一个要监视的 session。 |
+| `Rename Thread` | 给已有 thread 设置持久自定义名称。 |
+
+#### 命令面板命令
+
+按 `Ctrl + Shift + P` 打开命令面板，搜索 `Codex Task Notify` 可以看到命令：
 
 ```text
 Codex Task Notify: Start Monitoring
@@ -169,71 +180,198 @@ Codex Task Notify: show_last
 Codex Task Notify: help
 ```
 
-扩展状态栏按钮：
+最常用的是：
+
+| 命令 | 作用 |
+| --- | --- |
+| `Start Monitoring` | 开始监视。 |
+| `Stop Monitoring` | 暂停监视。 |
+| `Monitor Current Session` | 将当前 session 加入监视。 |
+| `Choose Session to Monitor` | 手动选择 session。 |
+| `Open Shared Config` | 打开共享配置文件。 |
+| `Show Recent Events` | 查看最近通知记录。 |
+| `rename` | 给 thread 改名。 |
+| `show` | 查看当前热监视队列。 |
+
+### 2. Windows 桌面通知
+
+Windows 桌面通知默认开启。适合你把 VS Code 最小化、切到浏览器、文档或其他软件时使用。
+
+默认配置文件路径：
 
 ```text
-Codex Start       开始或继续监视
-Codex Pause       暂停/停止监视
-Watch Current     监视当前 .jsonl，或最近写入的 Codex session
-Choose Session    从最近 session 列表中选择要监视的 session
-Rename Thread     给 thread 设置持久自定义名称
+%USERPROFILE%\.codex-task-notify\config.json
 ```
 
-目前 VS Code 不提供稳定 API 让一个扩展直接读取另一个 Codex 扩展 Webview 当前打开的 thread。因此 `Watch Current` 的策略是：
+默认配置中桌面通知已经启用：
 
-1. 如果当前编辑器打开的是 `.jsonl`，直接加入该文件。
-2. 否则选择 `sessionsRoot` 下最近写入的 `.jsonl`。
-3. 如果不确定，使用 `Choose Session` 手动选择。
+```json
+{
+  "desktop": {
+    "enabled": true,
+    "sound": false
+  }
+}
+```
 
-## 通知内容
+如果你想关闭桌面通知，把 `enabled` 改成 `false`：
 
-默认通知标题和正文会优先使用 thread 名称。
+```json
+{
+  "desktop": {
+    "enabled": false,
+    "sound": false
+  }
+}
+```
 
-Bark 推送标题固定为：
+也可以用环境变量覆盖：
+
+```dotenv
+CODEX_TASK_NOTIFY_DESKTOP_ENABLED=true
+CODEX_TASK_NOTIFY_DESKTOP_SOUND=false
+```
+
+### 3. Bark iPhone 推送
+
+Bark 用于把 Codex 任务完成消息推送到 iPhone。适合你离开电脑，或者希望任务完成后手机也能收到提醒。
+
+#### 第一步：安装 Bark
+
+1. 在 iPhone 上安装 Bark。
+2. 打开 Bark，复制你的 Bark device key。
+3. 默认服务地址通常是：
 
 ```text
-codex
+https://api.day.app
 ```
 
-Bark 推送正文格式：
+#### 第二步：打开配置文件
+
+如果你使用 VS Code 扩展，可以直接执行：
 
 ```text
-任务{Thread Name}已完成，用时{duration}
+Codex Task Notify: Open Shared Config
 ```
 
-如果原始 thread 名称包含 VS Code 自动注入的上下文前缀，例如 `# Context from my IDE setup`，程序会尽量清洗，只保留真实用户请求内容。
-
-## Bark 推送说明
-
-Bark 推送实现位于 `src/shared/bark.ts`。
-
-已支持字段：
-
-- `title`
-- `body`
-- `sound`
-- `group`
-- `badge`
-- `isArchive`
-- `icon`
-- `ciphertext`
-- `iv`
-
-加密方式：
+也可以手动打开：
 
 ```text
-AES-256-GCM
+%USERPROFILE%\.codex-task-notify\config.json
 ```
 
-约束：
+#### 第三步：填写 Bark 配置
 
-- `CODEX_TASK_NOTIFY_BARK_ENCRYPTION_KEY` 必须是 32 个字符。
-- `CODEX_TASK_NOTIFY_BARK_ENCRYPTION_IV` 必须是 12 个字符。
-- Bark 图标 URL 应使用稳定的直链图片地址，避免使用会过期的跳转链接。
+把 `bark.enabled` 改成 `true`，并填入你的 `deviceKey`：
 
-## 打包 VSIX
+```json
+{
+  "bark": {
+    "enabled": true,
+    "serverUrl": "https://api.day.app",
+    "deviceKey": "你的 Bark device key",
+    "sound": "multiwayinvitation",
+    "isArchive": true,
+    "encryption": {
+      "enabled": false,
+      "key": "",
+      "iv": ""
+    }
+  }
+}
+```
 
-打包命令：
+保存后重启监视即可：
+
+- VS Code 扩展：执行 `Codex Task Notify: restart`
+- CLI：输入 `restart`
+
+#### 可选：Bark 加密推送
+
+如果你要使用 Bark 加密推送，可以开启 AES-256-GCM 加密：
+
+```json
+{
+  "bark": {
+    "enabled": true,
+    "serverUrl": "https://api.day.app",
+    "deviceKey": "你的 Bark device key",
+    "encryption": {
+      "enabled": true,
+      "key": "12345678901234567890123456789012",
+      "iv": "123456789012"
+    }
+  }
+}
+```
+
+注意：
+
+- `key` 必须是 32 个字符。
+- `iv` 必须是 12 个字符。
+- Bark 客户端侧也需要使用一致的加密配置。
+
+也可以使用环境变量：
+
+```dotenv
+CODEX_TASK_NOTIFY_BARK_ENABLED=true
+CODEX_TASK_NOTIFY_BARK_SERVER_URL=https://api.day.app
+CODEX_TASK_NOTIFY_BARK_DEVICE_KEY=your-bark-device-key
+CODEX_TASK_NOTIFY_BARK_SOUND=multiwayinvitation
+CODEX_TASK_NOTIFY_BARK_ARCHIVE=true
+CODEX_TASK_NOTIFY_BARK_ENCRYPTION_ENABLED=false
+CODEX_TASK_NOTIFY_BARK_ENCRYPTION_KEY=
+CODEX_TASK_NOTIFY_BARK_ENCRYPTION_IV=
+```
+
+## 共享配置
+
+Codex Task Notify 默认会自动创建配置文件：
+
+```text
+%USERPROFILE%\.codex-task-notify\config.json
+```
+
+关键字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `sessionsRoot` | Codex session 文件目录，默认是 `%USERPROFILE%\.codex\sessions`。 |
+| `stateFilePath` | 本地状态文件路径，用于记录已通知事件、thread 改名等信息。 |
+| `desktop.enabled` | 是否启用 Windows 桌面通知。 |
+| `bark.enabled` | 是否启用 Bark 手机推送。 |
+| `hotPollIntervalMs` | 热监视检查间隔，默认 5000ms。 |
+| `coldPollIntervalMs` | 冷队列检查间隔，默认 30000ms。 |
+
+通常不需要手动修改 `sessionsRoot`。只有在你的 Codex session 目录不在默认位置时才需要改。
+
+## 本地开发
+
+安装依赖：
+
+```powershell
+npm install
+```
+
+构建：
+
+```powershell
+npm run build
+```
+
+运行 smoke test：
+
+```powershell
+npm run smoke
+```
+
+启动 CLI daemon：
+
+```powershell
+npm run start:daemon
+```
+
+打包 VSIX：
 
 ```powershell
 npm run package:vsix
@@ -245,45 +383,50 @@ npm run package:vsix
 releases/vsix/
 ```
 
-输出文件名格式：
+## 工作原理，简版
+
+Codex Task Notify 的核心逻辑并不依赖 Codex 的 UI，而是监听 Codex 写入本机的 session `.jsonl` 文件。
+
+当 Codex 任务完成时，session 文件中会出现任务完成事件。Codex Task Notify 会检测这些文件变化，解析完成事件，然后把通知分发到已启用的通知通道。
+
+这也是它能同时支持 CLI、IDE 扩展和 Codex 桌面版的原因：只要底层 session 文件一致，上层入口是什么并不重要。
+
+## 项目结构
 
 ```text
-codex-task-notify-{version}.vsix
+.
+├─ assets/icons/           # 项目图标和 Bark 推送图标素材
+├─ releases/vsix/          # 已打包的 VS Code 扩展包
+├─ scripts/                # 打包脚本
+├─ src/
+│  ├─ daemon.ts            # CLI daemon 入口
+│  ├─ extension.ts         # VS Code 扩展入口
+│  ├─ latencyProbe.ts      # 延迟探测工具
+│  ├─ shared/              # 共享 runtime、配置、通知、Bark、watcher
+│  └─ test/smoke.ts        # smoke test
+├─ tools/                  # 调试/追踪脚本
+├─ .env.example            # 环境变量模板
+├─ package.json
+└─ tsconfig.json
 ```
 
-历史包目前保留在 `releases/vsix`，便于回滚和安装测试。
+## 通知内容
 
-## 延迟调试
+通知会优先使用 thread 名称或你手动设置的 thread 名称。
 
-项目包含两个辅助工具：
+Bark 推送标题默认是：
 
 ```text
-src/latencyProbe.ts
-tools/trace-watcher-change.js
+codex
 ```
 
-它们用于定位：
+Bark 推送正文类似：
 
-- Codex 写入 `task_complete` 的时间
-- watcher/change 事件触发时间
-- 监视系统解析并通知的时间
-
-历史结论是：Codex 写入 `task_complete` 通常很快，主要风险在于“如何及时发现哪个 session 文件发生了变化”。
-
-## 已知限制
-
-- Windows 文件系统事件在长时间运行和递归监听场景下可能出现随机延迟；当前版本只在“当天 session 目录”和 `archived_sessions` 两个低层级目录使用 `fs.watch`，并为当天目录增加了补扫兜底。
-- 已归档 Codex 会话目前更像是移动到 `.codex/archived_sessions`，不是在原 session 文件中写入 `archived` 字段。
-- 冷查询会覆盖所有未归档 session；如果未归档历史 session 很多，`CODEX_TASK_NOTIFY_COLD_POLL_INTERVAL_MS` 可以适当调大。
-
-## 开发命令
-
-```powershell
-npm run build
-npm run smoke
-npm run start:daemon
-npm run package:vsix
+```text
+任务 {Thread Name} 已完成，用时 {duration}
 ```
+
+如果原始 thread 名称包含 VS Code 自动注入的上下文前缀，程序会尽量清洗，只保留更接近真实任务内容的名称。
 
 ## 许可证
 
