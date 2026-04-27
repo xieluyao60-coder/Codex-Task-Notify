@@ -1,0 +1,175 @@
+{
+  "name": "codex-task-notify",
+  "displayName": "Codex Task Notify",
+  "description": "Unified task completion notifications for Codex sessions across IDE, CLI, and app workflows.",
+  "version": "1.3.0",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xieluyao60-coder/Codex-Task-Notify.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xieluyao60-coder/Codex-Task-Notify/issues"
+  },
+  "homepage": "https://github.com/xieluyao60-coder/Codex-Task-Notify#readme",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:codexTaskNotify.startMonitoring",
+    "onCommand:codexTaskNotify.stopMonitoring",
+    "onCommand:codexTaskNotify.restartMonitoring",
+    "onCommand:codexTaskNotify.continueMonitoring",
+    "onCommand:codexTaskNotify.quitMonitoring",
+    "onCommand:codexTaskNotify.addSessionFile",
+    "onCommand:codexTaskNotify.monitorActiveSession",
+    "onCommand:codexTaskNotify.chooseSessionFile",
+    "onCommand:codexTaskNotify.openConfig",
+    "onCommand:codexTaskNotify.showRecentEvents",
+    "onCommand:codexTaskNotify.renameSessionAlias",
+    "onCommand:codexTaskNotify.clearSessionAliases",
+    "onCommand:codexTaskNotify.showHotThreads",
+    "onCommand:codexTaskNotify.showLastAddedSessions",
+    "onCommand:codexTaskNotify.showHelp"
+  ],
+  "main": "./dist/extension.js",
+  "files": [
+    "dist/daemon.js",
+    "dist/extension.js",
+    "dist/shared/**/*.js",
+    "node_modules/@parcel/**",
+    "node_modules/growly/**",
+    "node_modules/is-extglob/**",
+    "node_modules/is-glob/**",
+    "node_modules/is-docker/**",
+    "node_modules/is-wsl/**",
+    "node_modules/isexe/**",
+    "node_modules/node-notifier/**",
+    "node_modules/picomatch/**",
+    "node_modules/readdirp/**",
+    "node_modules/semver/**",
+    "node_modules/shellwords/**",
+    "node_modules/uuid/**",
+    "node_modules/which/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "codex-task-notify": "./dist/daemon.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexTaskNotify.startMonitoring",
+        "title": "Codex Task Notify: Start Monitoring"
+      },
+      {
+        "command": "codexTaskNotify.stopMonitoring",
+        "title": "Codex Task Notify: Stop Monitoring"
+      },
+      {
+        "command": "codexTaskNotify.restartMonitoring",
+        "title": "Codex Task Notify: restart"
+      },
+      {
+        "command": "codexTaskNotify.continueMonitoring",
+        "title": "Codex Task Notify: continue"
+      },
+      {
+        "command": "codexTaskNotify.quitMonitoring",
+        "title": "Codex Task Notify: quit"
+      },
+      {
+        "command": "codexTaskNotify.addSessionFile",
+        "title": "Codex Task Notify: add"
+      },
+      {
+        "command": "codexTaskNotify.monitorActiveSession",
+        "title": "Codex Task Notify: Monitor Current Session"
+      },
+      {
+        "command": "codexTaskNotify.chooseSessionFile",
+        "title": "Codex Task Notify: Choose Session to Monitor"
+      },
+      {
+        "command": "codexTaskNotify.openConfig",
+        "title": "Codex Task Notify: Open Shared Config"
+      },
+      {
+        "command": "codexTaskNotify.showRecentEvents",
+        "title": "Codex Task Notify: Show Recent Events"
+      },
+      {
+        "command": "codexTaskNotify.renameSessionAlias",
+        "title": "Codex Task Notify: rename"
+      },
+      {
+        "command": "codexTaskNotify.clearSessionAliases",
+        "title": "Codex Task Notify: clear_name"
+      },
+      {
+        "command": "codexTaskNotify.showHotThreads",
+        "title": "Codex Task Notify: show"
+      },
+      {
+        "command": "codexTaskNotify.showLastAddedSessions",
+        "title": "Codex Task Notify: show_last"
+      },
+      {
+        "command": "codexTaskNotify.showHelp",
+        "title": "Codex Task Notify: help"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Task Notify",
+      "properties": {
+        "codexTaskNotify.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start monitoring Codex session files when the extension activates."
+        },
+        "codexTaskNotify.enableIdePopup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show VS Code popup notifications in addition to desktop and webhook channels."
+        },
+        "codexTaskNotify.maxRecentEvents": {
+          "type": "number",
+          "default": 20,
+          "minimum": 5,
+          "maximum": 100,
+          "description": "Maximum number of recent notification events kept in the output log buffer."
+        },
+        "codexTaskNotify.promptForSessionAlias": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prompt once for a custom Codex thread name when a new session first completes."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true });\"",
+    "smoke": "npm run build && node dist/test/smoke.js",
+    "start:daemon": "npm run build && node dist/daemon.js",
+    "probe:latency": "npm run build && node dist/latencyProbe.js",
+    "package:vsix": "npm run build && node scripts/package-vsix.js"
+  },
+  "dependencies": {
+    "@parcel/watcher": "^2.5.6",
+    "node-notifier": "^10.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "@types/node-notifier": "^8.0.5",
+    "@types/vscode": "^1.96.0",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+.vscode-test/
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
+# Runtime logs and local diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local runtime config/state
+.codex-task-notify/
+config.local.json
+state.json
+*.local.json
+
+# Internal handoff notes
+docs/internal/
+AGENT_HANDOFF.md
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.vscode/launch.json
