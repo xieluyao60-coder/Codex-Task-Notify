@@ -58,6 +58,7 @@ export interface NotifyConfig {
   sessionsRoot: string;
   stateFilePath: string;
   previewChars: number;
+  coldPollIntervalMs: number;
   hotPollIntervalMs: number;
   hotSessionIdleMs: number;
   allowedSources: string[];
@@ -104,6 +105,7 @@ export interface LoggerLike {
 export interface SessionWatcherOptions {
   previewChars: number;
   allowedSources?: Set<string>;
+  coldPollIntervalMs: number;
   hotPollIntervalMs: number;
   hotSessionIdleMs: number;
 }

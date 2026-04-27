@@ -15,6 +15,7 @@ const DEFAULT_CONFIG: NotifyConfig = {
   sessionsRoot: DEFAULT_SESSIONS_ROOT,
   stateFilePath: DEFAULT_STATE_PATH,
   previewChars: 180,
+  coldPollIntervalMs: 30_000,
   hotPollIntervalMs: 5000,
   hotSessionIdleMs: 2 * 60 * 60 * 1000,
   allowedSources: [],
@@ -87,6 +88,14 @@ function mergeConfig(input: Partial<NotifyConfig>): NotifyConfig {
 
   if (typeof input.previewChars === "number" && Number.isFinite(input.previewChars) && input.previewChars > 40) {
     config.previewChars = Math.floor(input.previewChars);
+  }
+
+  if (
+    typeof input.coldPollIntervalMs === "number" &&
+    Number.isFinite(input.coldPollIntervalMs) &&
+    input.coldPollIntervalMs >= 1000
+  ) {
+    config.coldPollIntervalMs = Math.floor(input.coldPollIntervalMs);
   }
 
   if (
@@ -233,8 +242,9 @@ function resolveEnvFileCandidates(): string[] {
 }
 
 function parseDotEnv(content: string): Array<[string, string]> {
+  const normalizedContent = normalizeFlattenedDotEnv(content);
   const entries: Array<[string, string]> = [];
-  for (const rawLine of content.split(/\r?\n/)) {
+  for (const rawLine of normalizedContent.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (line.length === 0 || line.startsWith("#")) {
       continue;
@@ -253,6 +263,19 @@ function parseDotEnv(content: string): Array<[string, string]> {
   }
 
   return entries;
+}
+
+function normalizeFlattenedDotEnv(content: string): string {
+  if (content.includes("\n") || content.includes("\r")) {
+    return content;
+  }
+
+  const codexKeyMatches = content.match(/\bCODEX_TASK_NOTIFY_[A-Z0-9_]+=/g);
+  if ((codexKeyMatches?.length ?? 0) < 2) {
+    return content;
+  }
+
+  return content.replace(/\s+(?=CODEX_TASK_NOTIFY_[A-Z0-9_]+=)/g, "\n");
 }
 
 function stripOptionalQuotes(input: string): string {
@@ -275,6 +298,9 @@ function applyEnvOverrides(config: NotifyConfig): NotifyConfig {
   });
   assignNumberEnv("CODEX_TASK_NOTIFY_PREVIEW_CHARS", 41, Number.POSITIVE_INFINITY, (value) => {
     config.previewChars = value;
+  });
+  assignNumberEnv("CODEX_TASK_NOTIFY_COLD_POLL_INTERVAL_MS", 1000, Number.POSITIVE_INFINITY, (value) => {
+    config.coldPollIntervalMs = value;
   });
   assignNumberEnv("CODEX_TASK_NOTIFY_HOT_POLL_INTERVAL_MS", 500, Number.POSITIVE_INFINITY, (value) => {
     config.hotPollIntervalMs = value;

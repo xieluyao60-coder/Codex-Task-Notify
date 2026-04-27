@@ -84,6 +84,7 @@ export class CodexNotifyRuntime {
       {
         previewChars: config.previewChars,
         allowedSources: config.allowedSources.length > 0 ? new Set(config.allowedSources) : undefined,
+        coldPollIntervalMs: config.coldPollIntervalMs,
         hotPollIntervalMs: config.hotPollIntervalMs,
         hotSessionIdleMs: config.hotSessionIdleMs
       },
@@ -130,6 +131,7 @@ export class CodexNotifyRuntime {
       {
         previewChars: config.previewChars,
         allowedSources: config.allowedSources.length > 0 ? new Set(config.allowedSources) : undefined,
+        coldPollIntervalMs: config.coldPollIntervalMs,
         hotPollIntervalMs: config.hotPollIntervalMs,
         hotSessionIdleMs: config.hotSessionIdleMs
       },

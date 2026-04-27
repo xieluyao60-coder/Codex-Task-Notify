@@ -42,16 +42,11 @@
     "dist/daemon.js",
     "dist/extension.js",
     "dist/shared/**/*.js",
-    "node_modules/@parcel/**",
     "node_modules/growly/**",
-    "node_modules/is-extglob/**",
-    "node_modules/is-glob/**",
     "node_modules/is-docker/**",
     "node_modules/is-wsl/**",
     "node_modules/isexe/**",
     "node_modules/node-notifier/**",
-    "node_modules/picomatch/**",
-    "node_modules/readdirp/**",
     "node_modules/semver/**",
     "node_modules/shellwords/**",
     "node_modules/uuid/**",
@@ -163,7 +158,6 @@
     "package:vsix": "npm run build && node scripts/package-vsix.js"
   },
   "dependencies": {
-    "@parcel/watcher": "^2.5.6",
     "node-notifier": "^10.0.1"
   },
   "devDependencies": {

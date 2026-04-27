@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-task-notify-"));
   const sessionsRoot = path.join(tempRoot, "sessions");
   const oldSessionFile = path.join(sessionsRoot, "2026", "04", "20", "rollout-old.jsonl");
-  const newSessionFile = path.join(sessionsRoot, "2026", "04", "26", "rollout-new.jsonl");
+  const newSessionFile = path.join(getTodaySessionDirectory(sessionsRoot), "rollout-new.jsonl");
   const manualSessionFile = path.join(tempRoot, "manual", "rollout-manual.jsonl");
   const stateFilePath = path.join(tempRoot, "state.json");
 
@@ -98,6 +98,7 @@ async function main(): Promise<void> {
     },
     {
       previewChars: 120,
+      coldPollIntervalMs: 100,
       hotPollIntervalMs: 100,
       hotSessionIdleMs: 2_000
     },
@@ -337,6 +338,66 @@ async function main(): Promise<void> {
   assert.equal(oldEvent?.threadLabel, "resume an old conversation");
   assert.equal(newEvent?.threadLabel, "start a new conversation");
   assert.equal(manualEvent?.threadLabel, "manually added conversation");
+
+  const archivedSessionsRoot = path.join(tempRoot, "archived_sessions");
+  const archivedOldSessionFile = path.join(archivedSessionsRoot, path.basename(oldSessionFile));
+  await fs.mkdir(archivedSessionsRoot, { recursive: true });
+  await fs.copyFile(oldSessionFile, archivedOldSessionFile);
+  await waitFor(
+    () => store.getSessionCatalogRecord("session-old")?.archived === true,
+    2_000,
+    "archived session discovery"
+  );
+
+  const receivedBeforeArchivedAppend = receivedEvents.length;
+  await fs.appendFile(
+    oldSessionFile,
+    [
+      toJsonLine({
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: "old-turn-2"
+        }
+      }),
+      toJsonLine({
+        type: "turn_context",
+        payload: {
+          turn_id: "old-turn-2",
+          cwd: "D:\\demo-project"
+        }
+      }),
+      toJsonLine({
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "archived conversation should not notify"
+        }
+      }),
+      toJsonLine({
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "this archived append must be ignored"
+        }
+      }),
+      toJsonLine({
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "old-turn-2",
+          last_agent_message: "this archived append must be ignored",
+          completed_at: 1777200200,
+          duration_ms: 1100
+        }
+      }),
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  await delay(500);
+  assert.equal(receivedEvents.length, receivedBeforeArchivedAppend);
+
   assert.equal(formatNotificationTitle(newEvent), "start a new conversation");
   assert.equal(formatNotificationBody(newEvent), "\u4efb\u52a1\u5df2\u5b8c\u6210 | \u603b\u8ba1\u7528\u65f6 2s");
   assert.equal(formatBarkNotificationTitle(), "codex");
@@ -406,6 +467,15 @@ async function waitFor(predicate: () => boolean, timeoutMs: number, label: strin
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getTodaySessionDirectory(sessionsRoot: string, date: Date = new Date()): string {
+  return path.join(
+    sessionsRoot,
+    String(date.getFullYear()),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  );
 }
 
 void main().catch((error) => {

@@ -6,6 +6,7 @@ interface PersistedState {
   sessionLabels?: Record<string, PersistedSessionLabel>;
   sessionBadges?: Record<string, number>;
   manualHotSessions?: Record<string, PersistedManualHotSession>;
+  sessionCatalog?: Record<string, PersistedSessionCatalogRecord>;
 }
 
 interface PersistedSessionLabel {
@@ -18,6 +19,14 @@ interface PersistedManualHotSession {
   sessionId: string;
   filePath: string;
   addedAtMs: number;
+}
+
+interface PersistedSessionCatalogRecord {
+  sessionId: string;
+  filePath: string;
+  archived: boolean;
+  archivedFilePath?: string;
+  updatedAtMs: number;
 }
 
 export interface SessionLabelRecord {
@@ -33,6 +42,14 @@ export interface ManualHotSessionRecord {
   addedAtMs: number;
 }
 
+export interface SessionCatalogRecord {
+  sessionId: string;
+  filePath: string;
+  archived: boolean;
+  archivedFilePath?: string;
+  updatedAtMs: number;
+}
+
 const RECENT_MANUAL_HOT_SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class ProcessedEventStore {
@@ -40,6 +57,7 @@ export class ProcessedEventStore {
   private readonly sessionLabels = new Map<string, PersistedSessionLabel>();
   private readonly sessionBadges = new Map<string, number>();
   private readonly manualHotSessions = new Map<string, PersistedManualHotSession>();
+  private readonly sessionCatalog = new Map<string, PersistedSessionCatalogRecord>();
   private nextBadge = 1;
 
   public constructor(
@@ -101,6 +119,29 @@ export class ProcessedEventStore {
           sessionId: record.sessionId.trim(),
           filePath: record.filePath.trim(),
           addedAtMs: Math.floor(record.addedAtMs)
+        });
+      }
+
+      for (const [sessionId, record] of Object.entries(parsed.sessionCatalog ?? {})) {
+        if (
+          typeof record?.sessionId !== "string" ||
+          record.sessionId.trim().length === 0 ||
+          typeof record.filePath !== "string" ||
+          record.filePath.trim().length === 0 ||
+          !Number.isFinite(record.updatedAtMs)
+        ) {
+          continue;
+        }
+
+        this.sessionCatalog.set(sessionId, {
+          sessionId: record.sessionId.trim(),
+          filePath: record.filePath.trim(),
+          archived: Boolean(record.archived),
+          archivedFilePath:
+            typeof record.archivedFilePath === "string" && record.archivedFilePath.trim().length > 0
+              ? record.archivedFilePath.trim()
+              : undefined,
+          updatedAtMs: Math.floor(record.updatedAtMs)
         });
       }
 
@@ -259,6 +300,51 @@ export class ProcessedEventStore {
       .sort((left, right) => right.addedAtMs - left.addedAtMs);
   }
 
+  public markSessionUnarchived(sessionId: string, filePath: string, updatedAtMs: number = Date.now()): void {
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    const normalizedFilePath = normalizeFilePath(filePath);
+
+    this.sessionCatalog.set(normalizedSessionId, {
+      sessionId: normalizedSessionId,
+      filePath: normalizedFilePath,
+      archived: false,
+      updatedAtMs: Math.floor(updatedAtMs)
+    });
+  }
+
+  public markSessionArchived(
+    sessionId: string,
+    filePath: string,
+    archivedFilePath?: string,
+    updatedAtMs: number = Date.now()
+  ): void {
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    const normalizedFilePath = normalizeFilePath(filePath);
+    const normalizedArchivedFilePath =
+      typeof archivedFilePath === "string" && archivedFilePath.trim().length > 0
+        ? normalizeFilePath(archivedFilePath)
+        : undefined;
+
+    this.sessionCatalog.set(normalizedSessionId, {
+      sessionId: normalizedSessionId,
+      filePath: normalizedFilePath,
+      archived: true,
+      archivedFilePath: normalizedArchivedFilePath,
+      updatedAtMs: Math.floor(updatedAtMs)
+    });
+  }
+
+  public getSessionCatalogRecord(sessionId: string): SessionCatalogRecord | undefined {
+    const record = this.sessionCatalog.get(sessionId);
+    return record ? { ...record } : undefined;
+  }
+
+  public listSessionCatalog(): SessionCatalogRecord[] {
+    return Array.from(this.sessionCatalog.values())
+      .map((record) => ({ ...record }))
+      .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+  }
+
   public async save(): Promise<void> {
     await fs.mkdir(path.dirname(this.stateFilePath), { recursive: true });
     this.pruneOldManualHotSessions();
@@ -267,7 +353,8 @@ export class ProcessedEventStore {
         processedEventIds: Array.from(this.processed).slice(-this.maxEntries),
         sessionLabels: Object.fromEntries(this.sessionLabels.entries()),
         sessionBadges: Object.fromEntries(this.sessionBadges.entries()),
-        manualHotSessions: Object.fromEntries(this.manualHotSessions.entries())
+        manualHotSessions: Object.fromEntries(this.manualHotSessions.entries()),
+        sessionCatalog: Object.fromEntries(this.sessionCatalog.entries())
       },
       null,
       2
@@ -289,6 +376,24 @@ function normalizeLabel(label: string): string {
   const normalized = label.trim();
   if (normalized.length === 0) {
     throw new Error("Session label cannot be empty.");
+  }
+
+  return normalized;
+}
+
+function normalizeSessionId(sessionId: string): string {
+  const normalized = sessionId.trim();
+  if (normalized.length === 0) {
+    throw new Error("Session catalog record requires a sessionId.");
+  }
+
+  return normalized;
+}
+
+function normalizeFilePath(filePath: string): string {
+  const normalized = filePath.trim();
+  if (normalized.length === 0) {
+    throw new Error("Session catalog record requires a filePath.");
   }
 
   return normalized;
