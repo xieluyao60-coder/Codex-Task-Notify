@@ -2,7 +2,7 @@
   "name": "codex-task-notify",
   "displayName": "Codex Task Notify",
   "description": "Unified task completion notifications for Codex sessions across IDE, CLI, and app workflows.",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {

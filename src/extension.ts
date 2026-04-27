@@ -56,9 +56,6 @@ class ExtensionController {
   private shouldPromptForSessionAlias = true;
   private enableIdePopup = true;
   private readonly startButton: vscode.StatusBarItem;
-  private readonly pauseButton: vscode.StatusBarItem;
-  private readonly monitorCurrentButton: vscode.StatusBarItem;
-  private readonly chooseSessionButton: vscode.StatusBarItem;
   private readonly renameButton: vscode.StatusBarItem;
 
   public constructor(
@@ -67,15 +64,9 @@ class ExtensionController {
   ) {
     this.logger = new OutputLogger(outputChannel);
     this.startButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 105);
-    this.pauseButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 104);
-    this.monitorCurrentButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 103);
-    this.chooseSessionButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 102);
     this.renameButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
     context.subscriptions.push(
       this.startButton,
-      this.pauseButton,
-      this.monitorCurrentButton,
-      this.chooseSessionButton,
       this.renameButton
     );
     this.configureStatusBarButtons();
@@ -297,49 +288,27 @@ class ExtensionController {
   }
 
   private configureStatusBarButtons(): void {
-    this.startButton.command = "codexTaskNotify.startMonitoring";
-    this.startButton.text = "$(debug-start) Codex Start";
-    this.startButton.tooltip = "Start or continue Codex Task Notify monitoring";
-    this.startButton.name = "Codex Task Notify Start";
-
-    this.pauseButton.command = "codexTaskNotify.stopMonitoring";
-    this.pauseButton.text = "$(debug-pause) Codex Pause";
-    this.pauseButton.tooltip = "Pause/stop Codex Task Notify monitoring";
-    this.pauseButton.name = "Codex Task Notify Pause";
-
-    this.monitorCurrentButton.command = "codexTaskNotify.monitorActiveSession";
-    this.monitorCurrentButton.text = "$(target) Watch Current";
-    this.monitorCurrentButton.tooltip =
-      "Add the active .jsonl file, or the most recently written Codex session, into hot monitoring";
-    this.monitorCurrentButton.name = "Codex Task Notify Watch Current";
-
-    this.chooseSessionButton.command = "codexTaskNotify.chooseSessionFile";
-    this.chooseSessionButton.text = "$(list-selection) Choose Session";
-    this.chooseSessionButton.tooltip = "Choose a recent Codex session file to hot-monitor";
-    this.chooseSessionButton.name = "Codex Task Notify Choose Session";
-
     this.renameButton.command = "codexTaskNotify.renameSessionAlias";
     this.renameButton.text = "$(edit) Rename Thread";
     this.renameButton.tooltip = "Set a persistent custom name for a Codex thread";
     this.renameButton.name = "Codex Task Notify Rename Thread";
 
     this.startButton.show();
-    this.pauseButton.show();
-    this.monitorCurrentButton.show();
-    this.chooseSessionButton.show();
     this.renameButton.show();
   }
 
   private updateStatusBarButtons(): void {
     const running = this.runtime?.isRunning() === true;
-    this.startButton.text = running ? "$(check) Codex On" : "$(debug-start) Codex Start";
+    this.startButton.command = running
+      ? "codexTaskNotify.stopMonitoring"
+      : "codexTaskNotify.startMonitoring";
+    this.startButton.text = running ? "$(check) Codex On" : "$(circle-large-outline) Codex Off";
     this.startButton.tooltip = running
-      ? "Codex Task Notify is monitoring. Click to start again if needed."
-      : "Start Codex Task Notify monitoring";
-    this.pauseButton.text = running ? "$(debug-pause) Codex Pause" : "$(circle-slash) Codex Stopped";
-    this.pauseButton.tooltip = running
-      ? "Pause/stop Codex Task Notify monitoring"
-      : "Monitoring is already stopped";
+      ? "Codex Task Notify is monitoring. Click to stop monitoring."
+      : "Codex Task Notify is stopped. Click to start monitoring.";
+    this.startButton.name = running
+      ? "Codex Task Notify On"
+      : "Codex Task Notify Off";
   }
 
   private async addSessionPathToHotLoop(filePath: string, messagePrefix?: string): Promise<void> {
