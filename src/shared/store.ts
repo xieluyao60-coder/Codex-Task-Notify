@@ -1,12 +1,15 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+import { QuotaAlertState } from "./types";
+
 interface PersistedState {
   processedEventIds: string[];
   sessionLabels?: Record<string, PersistedSessionLabel>;
   sessionBadges?: Record<string, number>;
   manualHotSessions?: Record<string, PersistedManualHotSession>;
   sessionCatalog?: Record<string, PersistedSessionCatalogRecord>;
+  quotaAlertStates?: Record<string, PersistedQuotaAlertState>;
 }
 
 interface PersistedSessionLabel {
@@ -27,6 +30,16 @@ interface PersistedSessionCatalogRecord {
   archived: boolean;
   archivedFilePath?: string;
   updatedAtMs: number;
+}
+
+interface PersistedQuotaAlertState {
+  key: string;
+  provider: string;
+  windowKey: QuotaAlertState["windowKey"];
+  metric: QuotaAlertState["metric"];
+  remainingValue: number;
+  observedAt?: number;
+  observedAtIso?: string;
 }
 
 export interface SessionLabelRecord {
@@ -58,6 +71,7 @@ export class ProcessedEventStore {
   private readonly sessionBadges = new Map<string, number>();
   private readonly manualHotSessions = new Map<string, PersistedManualHotSession>();
   private readonly sessionCatalog = new Map<string, PersistedSessionCatalogRecord>();
+  private readonly quotaAlertStates = new Map<string, PersistedQuotaAlertState>();
   private nextBadge = 1;
 
   public constructor(
@@ -142,6 +156,33 @@ export class ProcessedEventStore {
               ? record.archivedFilePath.trim()
               : undefined,
           updatedAtMs: Math.floor(record.updatedAtMs)
+        });
+      }
+
+      for (const [key, record] of Object.entries(parsed.quotaAlertStates ?? {})) {
+        if (
+          typeof record?.key !== "string" ||
+          record.key.trim().length === 0 ||
+          typeof record.provider !== "string" ||
+          record.provider.trim().length === 0 ||
+          (record.windowKey !== "primary" && record.windowKey !== "secondary") ||
+          record.metric !== "remaining_percent" ||
+          !Number.isFinite(record.remainingValue)
+        ) {
+          continue;
+        }
+
+        this.quotaAlertStates.set(key, {
+          key: record.key.trim(),
+          provider: record.provider.trim(),
+          windowKey: record.windowKey,
+          metric: record.metric,
+          remainingValue: record.remainingValue,
+          observedAt: Number.isFinite(record.observedAt) ? Math.floor(record.observedAt!) : undefined,
+          observedAtIso:
+            typeof record.observedAtIso === "string" && record.observedAtIso.trim().length > 0
+              ? record.observedAtIso.trim()
+              : undefined
         });
       }
 
@@ -345,6 +386,33 @@ export class ProcessedEventStore {
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
   }
 
+  public listQuotaAlertStates(): QuotaAlertState[] {
+    return Array.from(this.quotaAlertStates.values()).map((record) => ({ ...record }));
+  }
+
+  public replaceQuotaAlertStates(states: QuotaAlertState[]): boolean {
+    const nextEntries = states
+      .filter((state) => state.key.trim().length > 0)
+      .map((state) => [state.key, { ...state }] as const)
+      .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey));
+    const currentEntries = Array.from(this.quotaAlertStates.entries())
+      .map(([key, value]) => [key, { ...value }] as const)
+      .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey));
+
+    const nextSerialized = JSON.stringify(nextEntries);
+    const currentSerialized = JSON.stringify(currentEntries);
+    if (nextSerialized === currentSerialized) {
+      return false;
+    }
+
+    this.quotaAlertStates.clear();
+    for (const [key, value] of nextEntries) {
+      this.quotaAlertStates.set(key, value);
+    }
+
+    return true;
+  }
+
   public async save(): Promise<void> {
     await fs.mkdir(path.dirname(this.stateFilePath), { recursive: true });
     this.pruneOldManualHotSessions();
@@ -354,7 +422,8 @@ export class ProcessedEventStore {
         sessionLabels: Object.fromEntries(this.sessionLabels.entries()),
         sessionBadges: Object.fromEntries(this.sessionBadges.entries()),
         manualHotSessions: Object.fromEntries(this.manualHotSessions.entries()),
-        sessionCatalog: Object.fromEntries(this.sessionCatalog.entries())
+        sessionCatalog: Object.fromEntries(this.sessionCatalog.entries()),
+        quotaAlertStates: Object.fromEntries(this.quotaAlertStates.entries())
       },
       null,
       2

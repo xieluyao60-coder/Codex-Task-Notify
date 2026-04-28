@@ -15,6 +15,9 @@ export interface TurnState {
   userMessage?: string;
   lastAgentMessage?: string;
   errorMessage?: string;
+  usageTotalBaseline?: TaskResourceUsage;
+  usageTotalBaselineInitialized?: boolean;
+  resourceUsage?: TaskResourceUsage;
 }
 
 export interface FileTracker {
@@ -26,6 +29,7 @@ export interface FileTracker {
   session?: SessionMeta;
   turns: Map<string, TurnState>;
   activeTurnId?: string;
+  lastSessionUsageTotal?: TaskResourceUsage;
 }
 
 export interface WebhookTarget {
@@ -54,6 +58,41 @@ export interface BarkConfig {
   encryption: BarkEncryptionConfig;
 }
 
+export type QuotaTriggerMetric = "remaining_percent";
+
+export interface QuotaTriggerThreshold {
+  metric: QuotaTriggerMetric;
+  value: number;
+}
+
+export interface QuotaAlertTriggerConfig {
+  primary: QuotaTriggerThreshold;
+  secondary: QuotaTriggerThreshold;
+}
+
+export type QuotaWindowKey = "primary" | "secondary";
+
+export interface QuotaAlertState {
+  key: string;
+  provider: string;
+  windowKey: QuotaWindowKey;
+  metric: QuotaTriggerMetric;
+  remainingValue: number;
+  observedAt?: number;
+  observedAtIso?: string;
+}
+
+export interface QuotaAlertEvent {
+  id: string;
+  key: string;
+  provider: string;
+  windowKey: QuotaWindowKey;
+  metric: QuotaTriggerMetric;
+  remainingValue: number;
+  observedAt?: number;
+  observedAtIso?: string;
+}
+
 export interface NotifyConfig {
   sessionsRoot: string;
   stateFilePath: string;
@@ -68,7 +107,47 @@ export interface NotifyConfig {
     appID?: string;
   };
   bark: BarkConfig;
+  quotaAlerts: {
+    enabled: boolean;
+    trigger: QuotaAlertTriggerConfig;
+    bark: {
+      sound: string;
+      iconUrl?: string;
+    };
+  };
   webhooks: WebhookTarget[];
+}
+
+export interface TokenUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+  totalTokens?: number;
+}
+
+export interface TaskResourceUsage {
+  tokens?: TokenUsage;
+}
+
+export interface BalanceWindowSnapshot {
+  usedPercent: number;
+  windowMinutes: number;
+  resetsAt?: number;
+  resetsAtIso?: string;
+}
+
+export interface BalanceSnapshot {
+  provider: string;
+  observedAt?: number;
+  observedAtIso?: string;
+  limitId?: string;
+  limitName?: string | null;
+  planType?: string | null;
+  credits?: number | null;
+  rateLimitReachedType?: string | null;
+  primary?: BalanceWindowSnapshot;
+  secondary?: BalanceWindowSnapshot;
 }
 
 export interface NormalizedNotificationEvent {
@@ -88,11 +167,13 @@ export interface NormalizedNotificationEvent {
   completedAt?: number;
   completedAtIso?: string;
   sessionFile: string;
+  resourceUsage?: TaskResourceUsage;
 }
 
 export interface NotificationChannel {
   readonly name: string;
   send(event: NormalizedNotificationEvent): Promise<void>;
+  sendQuotaAlert?(alert: QuotaAlertEvent): Promise<void>;
   dispose?(): Promise<void> | void;
 }
 

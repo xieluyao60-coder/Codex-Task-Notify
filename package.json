@@ -2,7 +2,7 @@
   "name": "agent-task-notify",
   "displayName": "Agent Task Notify",
   "description": "Unified task completion notifications for Codex sessions across IDE, CLI, and app workflows.",
-  "version": "1.4.0",
+  "version": "1.6.0",
   "publisher": "ayanami-ray",
   "icon": "assets/icons/icon.png",
   "license": "MIT",
@@ -27,6 +27,8 @@
     "onCommand:codexTaskNotify.restartMonitoring",
     "onCommand:codexTaskNotify.continueMonitoring",
     "onCommand:codexTaskNotify.quitMonitoring",
+    "onCommand:codexTaskNotify.checkBalance",
+    "onCommand:codexTaskNotify.setTrigger",
     "onCommand:codexTaskNotify.addSessionFile",
     "onCommand:codexTaskNotify.monitorActiveSession",
     "onCommand:codexTaskNotify.chooseSessionFile",
@@ -52,7 +54,7 @@
     "node_modules/shellwords/**",
     "node_modules/uuid/**",
     "node_modules/which/**",
-    "assets/**",vsce publish
+    "assets/**",
     "README.md",
     "LICENSE"
   ],
@@ -80,6 +82,14 @@
       {
         "command": "codexTaskNotify.quitMonitoring",
         "title": "Codex Task Notify: quit"
+      },
+      {
+        "command": "codexTaskNotify.checkBalance",
+        "title": "Codex Task Notify: check balance"
+      },
+      {
+        "command": "codexTaskNotify.setTrigger",
+        "title": "Codex Task Notify: set trigger"
       },
       {
         "command": "codexTaskNotify.addSessionFile",

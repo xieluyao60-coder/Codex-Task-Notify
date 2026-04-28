@@ -4,13 +4,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+  formatBalanceButtonText,
+  buildDefaultThreadLabel,
+  formatBalanceDetails,
   formatBarkNotificationBody,
   formatBarkNotificationTitle,
   formatNotificationBody,
   formatNotificationTitle,
-  normalizeThreadDisplayLabel,
-  buildDefaultThreadLabel
+  formatQuotaAlertBody,
+  formatQuotaAlertTitle,
+  formatQuotaTriggerDetails,
+  normalizeThreadDisplayLabel
 } from "../shared/format";
+import { getDefaultQuotaAlertTrigger } from "../shared/config";
+import { evaluateQuotaAlerts } from "../shared/quotaAlerts";
 import { CodexSessionWatcher } from "../shared/sessionWatcher";
 import { ProcessedEventStore } from "../shared/store";
 import { LoggerLike, NormalizedNotificationEvent } from "../shared/types";
@@ -140,6 +147,11 @@ async function main(): Promise<void> {
         }
       }),
       toJsonLine({
+        timestamp: "2026-04-27T00:00:01.000Z",
+        type: "event_msg",
+        payload: createTokenCountPayload(450, 12, 34)
+      }),
+      toJsonLine({
         type: "event_msg",
         payload: {
           type: "task_complete",
@@ -196,6 +208,16 @@ async function main(): Promise<void> {
         }
       }),
       toJsonLine({
+        timestamp: "2026-04-27T00:01:01.000Z",
+        type: "event_msg",
+        payload: createTokenCountPayload(200, 13, 35)
+      }),
+      toJsonLine({
+        timestamp: "2026-04-27T00:01:02.000Z",
+        type: "event_msg",
+        payload: createTokenCountPayload(300, 14, 36)
+      }),
+      toJsonLine({
         type: "event_msg",
         payload: {
           type: "task_complete",
@@ -203,6 +225,54 @@ async function main(): Promise<void> {
           last_agent_message: "new session detected and captured by hot polling",
           completed_at: 1777200060,
           duration_ms: 1500
+        }
+      }),
+      toJsonLine({
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: "new-turn-2"
+        }
+      }),
+      toJsonLine({
+        type: "turn_context",
+        payload: {
+          turn_id: "new-turn-2",
+          cwd: "D:\\demo-project"
+        }
+      }),
+      toJsonLine({
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "continue a new conversation"
+        }
+      }),
+      toJsonLine({
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "follow-up turn should use total token delta"
+        }
+      }),
+      toJsonLine({
+        timestamp: "2026-04-27T00:01:31.000Z",
+        type: "event_msg",
+        payload: createTokenCountPayload(300, 15, 37)
+      }),
+      toJsonLine({
+        timestamp: "2026-04-27T00:01:32.000Z",
+        type: "event_msg",
+        payload: createTokenCountPayload(360, 16, 38)
+      }),
+      toJsonLine({
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "new-turn-2",
+          last_agent_message: "follow-up turn should use total token delta",
+          completed_at: 1777200092,
+          duration_ms: 1200
         }
       }),
       ""
@@ -303,6 +373,11 @@ async function main(): Promise<void> {
         }
       }),
       toJsonLine({
+        timestamp: "2026-04-27T00:02:01.000Z",
+        type: "event_msg",
+        payload: createTokenCountPayload(700, 17, 39)
+      }),
+      toJsonLine({
         type: "event_msg",
         payload: {
           type: "task_complete",
@@ -317,26 +392,36 @@ async function main(): Promise<void> {
     "utf8"
   );
 
-  await waitFor(() => receivedEvents.length === 3, 4_000, "hot polling notifications");
+  await waitFor(() => receivedEvents.length === 4, 4_000, "hot polling notifications");
 
   const oldEvent = receivedEvents.find((event) => event.id === "session-old:old-turn-1");
   const newEvent = receivedEvents.find((event) => event.id === "session-new:new-turn-1");
+  const newFollowUpEvent = receivedEvents.find((event) => event.id === "session-new:new-turn-2");
   const manualEvent = receivedEvents.find((event) => event.id === "session-manual:manual-turn-1");
 
   assert.ok(oldEvent, "expected resumed old session event");
   assert.ok(newEvent, "expected new session event");
+  assert.ok(newFollowUpEvent, "expected new session follow-up event");
   assert.ok(manualEvent, "expected manually added session event");
   assert.equal(oldEvent?.projectName, "demo-project");
   assert.equal(newEvent?.projectName, "demo-project");
+  assert.equal(newFollowUpEvent?.projectName, "demo-project");
   assert.equal(manualEvent?.projectName, "manual-project");
   assert.equal(oldEvent?.status, "success");
   assert.equal(newEvent?.status, "success");
+  assert.equal(newFollowUpEvent?.status, "success");
   assert.equal(manualEvent?.status, "success");
+  assert.equal(oldEvent?.resourceUsage?.tokens?.totalTokens, 450);
+  assert.equal(newEvent?.resourceUsage?.tokens?.totalTokens, 300);
+  assert.equal(newFollowUpEvent?.resourceUsage?.tokens?.totalTokens, 60);
+  assert.equal(manualEvent?.resourceUsage?.tokens?.totalTokens, 700);
   assert.match(oldEvent?.summary ?? "", /resumed/);
   assert.match(newEvent?.summary ?? "", /new session/);
+  assert.match(newFollowUpEvent?.summary ?? "", /follow-up/);
   assert.match(manualEvent?.summary ?? "", /manual file appended/);
   assert.equal(oldEvent?.threadLabel, "resume an old conversation");
   assert.equal(newEvent?.threadLabel, "start a new conversation");
+  assert.equal(newFollowUpEvent?.threadLabel, "continue a new conversation");
   assert.equal(manualEvent?.threadLabel, "manually added conversation");
 
   const archivedSessionsRoot = path.join(tempRoot, "archived_sessions");
@@ -399,15 +484,15 @@ async function main(): Promise<void> {
   assert.equal(receivedEvents.length, receivedBeforeArchivedAppend);
 
   assert.equal(formatNotificationTitle(newEvent), "start a new conversation");
-  assert.equal(formatNotificationBody(newEvent), "\u4efb\u52a1\u5df2\u5b8c\u6210 | \u603b\u8ba1\u7528\u65f6 2s");
+  assert.equal(formatNotificationBody(newEvent), "任务已完成，用时2s，消耗token为300");
   assert.equal(formatBarkNotificationTitle(), "codex");
-  assert.equal(formatBarkNotificationBody(newEvent), "\u4efb\u52a1start a new conversation\u5df2\u5b8c\u6210\uff0c\u7528\u65f62s");
+  assert.equal(formatBarkNotificationBody(newEvent), "任务“start a new conversation”已完成，用时2s，消耗token为300");
   assert.equal(
     formatBarkNotificationBody({
       ...newEvent!,
       threadLabel: "# Context from my IDE setup: ## Open tabs: README.md ## My request for Codex: 测试消息18"
     }),
-    "\u4efb\u52a1测试消息18\u5df2\u5b8c\u6210\uff0c\u7528\u65f62s"
+    "任务“测试消息18”已完成，用时2s，消耗token为300"
   );
   assert.equal(
     normalizeThreadDisplayLabel("# Context from my IDE setup: ## Open tabs: README.md ## My request for Codex: 测试消息18"),
@@ -445,6 +530,74 @@ async function main(): Promise<void> {
   assert.equal(recentManualSessions.length, 1);
   assert.equal(recentManualSessions[0]?.sessionId, "session-fresh");
 
+  const latestBalance = watcher.getLatestBalanceSnapshot();
+  assert.equal(latestBalance?.primary?.usedPercent, 17);
+  assert.equal(latestBalance?.secondary?.usedPercent, 39);
+  assert.equal(formatBalanceButtonText(latestBalance), "$(pulse) 5h 83% | 7d 61%");
+  assert.match(formatBalanceDetails(latestBalance), /5h: 83% remaining \(17% used\)/);
+
+  const trigger = getDefaultQuotaAlertTrigger();
+  const firstAlertEvaluation = evaluateQuotaAlerts(
+    {
+      provider: "session-log",
+      observedAt: 1777200200,
+      observedAtIso: "2026-04-27T00:03:20.000Z",
+      primary: {
+        usedPercent: 92,
+        windowMinutes: 300
+      },
+      secondary: {
+        usedPercent: 96,
+        windowMinutes: 10080
+      }
+    },
+    trigger,
+    []
+  );
+  assert.equal(firstAlertEvaluation.alerts.length, 2);
+  assert.equal(formatQuotaAlertTitle(), "Codex限额警告");
+  assert.equal(formatQuotaAlertBody(firstAlertEvaluation.alerts[0]!), "您的Codex 5h额度只剩8%");
+  assert.equal(formatQuotaAlertBody(firstAlertEvaluation.alerts[1]!), "您的Codex 7d额度只剩4%");
+  assert.equal(formatQuotaTriggerDetails(trigger), "5h <= 10%, 7d <= 5%");
+
+  const repeatedAlertEvaluation = evaluateQuotaAlerts(
+    {
+      provider: "session-log",
+      observedAt: 1777200260,
+      observedAtIso: "2026-04-27T00:04:20.000Z",
+      primary: {
+        usedPercent: 93,
+        windowMinutes: 300
+      },
+      secondary: {
+        usedPercent: 97,
+        windowMinutes: 10080
+      }
+    },
+    trigger,
+    firstAlertEvaluation.activeStates
+  );
+  assert.equal(repeatedAlertEvaluation.alerts.length, 0);
+
+  const resetAlertEvaluation = evaluateQuotaAlerts(
+    {
+      provider: "session-log",
+      observedAt: 1777200320,
+      observedAtIso: "2026-04-27T00:05:20.000Z",
+      primary: {
+        usedPercent: 80,
+        windowMinutes: 300
+      },
+      secondary: {
+        usedPercent: 90,
+        windowMinutes: 10080
+      }
+    },
+    trigger,
+    repeatedAlertEvaluation.activeStates
+  );
+  assert.equal(resetAlertEvaluation.activeStates.length, 0);
+
   await watcher.stop();
   await store.save();
 
@@ -453,6 +606,49 @@ async function main(): Promise<void> {
 
 function toJsonLine(value: unknown): string {
   return JSON.stringify(value);
+}
+
+function createTokenCountPayload(
+  totalTokens: number,
+  primaryUsedPercent: number,
+  secondaryUsedPercent: number,
+  lastTotalTokens: number = totalTokens
+): unknown {
+  return {
+    type: "token_count",
+    info: {
+      total_token_usage: {
+        input_tokens: Math.max(totalTokens - 50, 0),
+        cached_input_tokens: 0,
+        output_tokens: 40,
+        reasoning_output_tokens: 10,
+        total_tokens: totalTokens
+      },
+      last_token_usage: {
+        input_tokens: Math.max(lastTotalTokens - 50, 0),
+        cached_input_tokens: 0,
+        output_tokens: 40,
+        reasoning_output_tokens: 10,
+        total_tokens: lastTotalTokens
+      }
+    },
+    rate_limits: {
+      limit_id: "codex",
+      primary: {
+        used_percent: primaryUsedPercent,
+        window_minutes: 300,
+        resets_at: 1777600000
+      },
+      secondary: {
+        used_percent: secondaryUsedPercent,
+        window_minutes: 10080,
+        resets_at: 1778000000
+      },
+      credits: null,
+      plan_type: "team",
+      rate_limit_reached_type: null
+    }
+  };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs: number, label: string): Promise<void> {

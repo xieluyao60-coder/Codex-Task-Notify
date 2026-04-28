@@ -1,7 +1,12 @@
 import notifier from "node-notifier";
 
-import { formatSystemNotificationBody, formatSystemNotificationTitle } from "./format";
-import { LoggerLike, NormalizedNotificationEvent, NotificationChannel, WebhookTarget } from "./types";
+import {
+  formatQuotaAlertBody,
+  formatQuotaAlertTitle,
+  formatSystemNotificationBody,
+  formatSystemNotificationTitle
+} from "./format";
+import { LoggerLike, NormalizedNotificationEvent, NotificationChannel, QuotaAlertEvent, WebhookTarget } from "./types";
 
 export class DesktopNotifier implements NotificationChannel {
   public readonly name = "desktop";
@@ -45,6 +50,28 @@ export class DesktopNotifier implements NotificationChannel {
       );
     });
   }
+
+  public async sendQuotaAlert(alert: QuotaAlertEvent): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      notifier.notify(
+        {
+          title: formatQuotaAlertTitle(),
+          message: formatQuotaAlertBody(alert),
+          sound: this.sound,
+          wait: false,
+          ...(this.appID && this.appID.trim().length > 0 ? { appID: this.appID } : {})
+        },
+        (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve();
+        }
+      );
+    });
+  }
 }
 
 export class WebhookNotifier implements NotificationChannel {
@@ -68,6 +95,24 @@ export class WebhookNotifier implements NotificationChannel {
       throw new Error(`Webhook ${this.target.name} responded with ${response.status}`);
     }
   }
+
+  public async sendQuotaAlert(alert: QuotaAlertEvent): Promise<void> {
+    const response = await fetch(this.target.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.target.headers ?? {})
+      },
+      body: JSON.stringify({
+        type: "quota_alert",
+        payload: alert
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Webhook ${this.target.name} responded with ${response.status}`);
+    }
+  }
 }
 
 export async function sendThroughChannels(
@@ -82,6 +127,27 @@ export async function sendThroughChannels(
         logger.info(`Delivered notification via ${channel.name}: ${event.id}`);
       } catch (error) {
         logger.error(`Failed to deliver notification via ${channel.name}: ${(error as Error).message}`);
+      }
+    })
+  );
+}
+
+export async function sendQuotaAlertThroughChannels(
+  channels: NotificationChannel[],
+  alert: QuotaAlertEvent,
+  logger: LoggerLike
+): Promise<void> {
+  await Promise.allSettled(
+    channels.map(async (channel) => {
+      if (!channel.sendQuotaAlert) {
+        return;
+      }
+
+      try {
+        await channel.sendQuotaAlert(alert);
+        logger.info(`Delivered quota alert via ${channel.name}: ${alert.id}`);
+      } catch (error) {
+        logger.error(`Failed to deliver quota alert via ${channel.name}: ${(error as Error).message}`);
       }
     })
   );

@@ -4,9 +4,28 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import { ensureConfigFileExists, loadConfig } from "./shared/config";
-import { formatIdePopupMessage, normalizeThreadDisplayLabel } from "./shared/format";
+import {
+  formatBalanceButtonText,
+  formatBalanceButtonTooltip,
+  formatBalanceDetails,
+  formatIdePopupMessage,
+  formatQuotaAlertBody,
+  formatQuotaAlertTitle,
+  formatQuotaTriggerDetails,
+  formatTriggerButtonText,
+  formatTriggerButtonTooltip,
+  normalizeThreadDisplayLabel
+} from "./shared/format";
 import { CONTROL_COMMAND_HELP_LINES, CodexNotifyRuntime } from "./shared/runtime";
-import { LoggerLike, NormalizedNotificationEvent, NotificationChannel, RenameCandidate } from "./shared/types";
+import {
+  BalanceSnapshot,
+  LoggerLike,
+  NormalizedNotificationEvent,
+  NotificationChannel,
+  QuotaAlertEvent,
+  QuotaAlertTriggerConfig,
+  RenameCandidate
+} from "./shared/types";
 
 const MAX_SESSION_PICK_ITEMS = 80;
 const SESSION_PREVIEW_BYTES = 512 * 1024;
@@ -47,6 +66,10 @@ class IdePopupNotifier implements NotificationChannel {
 
     await vscode.window.showInformationMessage(message);
   }
+
+  public async sendQuotaAlert(alert: QuotaAlertEvent): Promise<void> {
+    await vscode.window.showWarningMessage(`${formatQuotaAlertTitle()}：${formatQuotaAlertBody(alert)}`);
+  }
 }
 
 class ExtensionController {
@@ -56,7 +79,11 @@ class ExtensionController {
   private shouldPromptForSessionAlias = true;
   private enableIdePopup = true;
   private readonly startButton: vscode.StatusBarItem;
+  private readonly balanceButton: vscode.StatusBarItem;
+  private readonly triggerButton: vscode.StatusBarItem;
   private readonly renameButton: vscode.StatusBarItem;
+  private latestBalanceSnapshot?: BalanceSnapshot;
+  private quotaAlertTrigger?: QuotaAlertTriggerConfig;
 
   public constructor(
     context: vscode.ExtensionContext,
@@ -64,9 +91,13 @@ class ExtensionController {
   ) {
     this.logger = new OutputLogger(outputChannel);
     this.startButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 105);
+    this.balanceButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 103);
+    this.triggerButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 102);
     this.renameButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
     context.subscriptions.push(
       this.startButton,
+      this.balanceButton,
+      this.triggerButton,
       this.renameButton
     );
     this.configureStatusBarButtons();
@@ -77,6 +108,8 @@ class ExtensionController {
     this.readExtensionSettings();
     const runtime = await this.getRuntime();
     const started = await runtime.start();
+    this.latestBalanceSnapshot = runtime.getLatestBalanceSnapshot();
+    this.quotaAlertTrigger = await runtime.getQuotaAlertTrigger();
     this.outputChannel.appendLine(started
       ? "Codex Task Notify started."
       : "Codex Task Notify is already running.");
@@ -113,6 +146,60 @@ class ExtensionController {
     const configPath = await ensureConfigFileExists();
     const document = await vscode.workspace.openTextDocument(configPath);
     await vscode.window.showTextDocument(document);
+  }
+
+  public async checkBalance(): Promise<void> {
+    const snapshot = (await this.getRuntime()).getLatestBalanceSnapshot();
+    const message = formatBalanceDetails(snapshot);
+    if (!snapshot) {
+      vscode.window.showWarningMessage(message);
+      return;
+    }
+
+    vscode.window.showInformationMessage(message);
+  }
+
+  public async setTrigger(): Promise<void> {
+    const runtime = await this.getRuntime();
+    const currentTrigger = this.quotaAlertTrigger ?? await runtime.getQuotaAlertTrigger();
+    const primaryValue = await vscode.window.showInputBox({
+      prompt: "Set the 5h remaining threshold for quota alerts",
+      placeHolder: "10",
+      value: String(currentTrigger.primary.value),
+      ignoreFocusOut: true,
+      validateInput: validatePercentInput
+    });
+
+    if (!primaryValue) {
+      return;
+    }
+
+    const secondaryValue = await vscode.window.showInputBox({
+      prompt: "Set the 7d remaining threshold for quota alerts",
+      placeHolder: "5",
+      value: String(currentTrigger.secondary.value),
+      ignoreFocusOut: true,
+      validateInput: validatePercentInput
+    });
+
+    if (!secondaryValue) {
+      return;
+    }
+
+    const nextTrigger: QuotaAlertTriggerConfig = {
+      primary: {
+        metric: "remaining_percent",
+        value: Number.parseFloat(primaryValue)
+      },
+      secondary: {
+        metric: "remaining_percent",
+        value: Number.parseFloat(secondaryValue)
+      }
+    };
+
+    this.quotaAlertTrigger = await runtime.updateQuotaAlertTrigger(nextTrigger);
+    this.updateStatusBarButtons();
+    vscode.window.showInformationMessage(`Updated trigger: ${formatQuotaTriggerDetails(this.quotaAlertTrigger)}`);
   }
 
   public showRecentEvents(): void {
@@ -288,12 +375,20 @@ class ExtensionController {
   }
 
   private configureStatusBarButtons(): void {
+    this.balanceButton.command = "codexTaskNotify.checkBalance";
+    this.balanceButton.name = "Codex Task Notify Balance";
+
+    this.triggerButton.command = "codexTaskNotify.setTrigger";
+    this.triggerButton.name = "Codex Task Notify Trigger";
+
     this.renameButton.command = "codexTaskNotify.renameSessionAlias";
     this.renameButton.text = "$(edit) Rename Thread";
     this.renameButton.tooltip = "Set a persistent custom name for a Codex thread";
     this.renameButton.name = "Codex Task Notify Rename Thread";
 
     this.startButton.show();
+    this.balanceButton.show();
+    this.triggerButton.show();
     this.renameButton.show();
   }
 
@@ -309,6 +404,13 @@ class ExtensionController {
     this.startButton.name = running
       ? "Codex Task Notify On"
       : "Codex Task Notify Off";
+
+    this.balanceButton.text = formatBalanceButtonText(this.latestBalanceSnapshot);
+    this.balanceButton.tooltip = formatBalanceButtonTooltip(this.latestBalanceSnapshot);
+    this.triggerButton.text = formatTriggerButtonText();
+    this.triggerButton.tooltip = this.quotaAlertTrigger
+      ? formatTriggerButtonTooltip(this.quotaAlertTrigger)
+      : "Set low-balance alert trigger";
   }
 
   private async addSessionPathToHotLoop(filePath: string, messagePrefix?: string): Promise<void> {
@@ -561,10 +663,16 @@ class ExtensionController {
     this.runtime = new CodexNotifyRuntime(configPath, this.logger, {
       getMaxRecentEvents: () => vscode.workspace.getConfiguration("codexTaskNotify").get<number>("maxRecentEvents", 20),
       createExtraChannels: (_config, _store, _logger) => this.enableIdePopup ? [new IdePopupNotifier()] : [],
+      onBalanceSnapshot: async (snapshot) => {
+        this.latestBalanceSnapshot = snapshot;
+        this.updateStatusBarButtons();
+      },
       logResolvedEvent: async (event) => {
         this.logger.info(`${event.completedAtIso ?? "unknown-time"} ${event.id} ${event.threadLabel}`);
       },
       onResolvedEvent: async (event, context) => {
+        this.latestBalanceSnapshot = this.runtime?.getLatestBalanceSnapshot();
+        this.updateStatusBarButtons();
         if (!context.hadManualAlias && this.shouldPromptForSessionAlias) {
           await this.maybePromptForSessionAlias(event);
         }
@@ -572,6 +680,20 @@ class ExtensionController {
     });
     return this.runtime;
   }
+}
+
+function validatePercentInput(input: string): string | undefined {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) {
+    return "Please enter a number between 0 and 100.";
+  }
+
+  const parsed = Number.parseFloat(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    return "Please enter a number between 0 and 100.";
+  }
+
+  return undefined;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -591,6 +713,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexTaskNotify.restartMonitoring", () => controller.restart()),
     vscode.commands.registerCommand("codexTaskNotify.continueMonitoring", () => controller.continueMonitoring()),
     vscode.commands.registerCommand("codexTaskNotify.quitMonitoring", () => controller.quit()),
+    vscode.commands.registerCommand("codexTaskNotify.checkBalance", () => controller.checkBalance()),
+    vscode.commands.registerCommand("codexTaskNotify.setTrigger", () => controller.setTrigger()),
     vscode.commands.registerCommand("codexTaskNotify.addSessionFile", () => controller.addSessionFile()),
     vscode.commands.registerCommand("codexTaskNotify.monitorActiveSession", () => controller.monitorActiveSession()),
     vscode.commands.registerCommand("codexTaskNotify.chooseSessionFile", () => controller.chooseSessionFile()),

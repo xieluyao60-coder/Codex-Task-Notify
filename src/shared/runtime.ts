@@ -1,15 +1,24 @@
-import { loadConfig } from "./config";
+import { loadConfig, readRawConfigFile, writeRawConfigFile } from "./config";
 import { BarkNotifier, isBarkReady } from "./bark";
-import { disposeChannels, sendThroughChannels, DesktopNotifier, WebhookNotifier } from "./notifications";
+import {
+  disposeChannels,
+  sendQuotaAlertThroughChannels,
+  sendThroughChannels,
+  DesktopNotifier,
+  WebhookNotifier
+} from "./notifications";
+import { evaluateQuotaAlerts } from "./quotaAlerts";
 import { CodexSessionWatcher } from "./sessionWatcher";
 import { ProcessedEventStore, SessionLabelRecord } from "./store";
 import {
+  BalanceSnapshot,
   HotSessionSnapshot,
   KnownSessionInfo,
   LoggerLike,
   NormalizedNotificationEvent,
   NotificationChannel,
   NotifyConfig,
+  QuotaAlertTriggerConfig,
   RecentManualHotSessionView,
   RenameCandidate
 } from "./types";
@@ -19,6 +28,8 @@ export const CONTROL_COMMAND_HELP_LINES = [
   "stop       stop monitoring",
   "continue   continue monitoring",
   "quit       exit the program or stop extension monitoring",
+  "check balance show current 5h / 7d balance snapshot",
+  "set trigger set low-balance alert thresholds for 5h / 7d",
   "add        add a .jsonl file into the hot monitoring loop",
   "rename     rename a thread",
   "clear_name clear all manual thread renames",
@@ -43,6 +54,7 @@ export type CodexNotifyRuntimeOptions = {
     context: RuntimeEventContext
   ) => Promise<void> | void;
   logResolvedEvent?: (event: NormalizedNotificationEvent) => Promise<void> | void;
+  onBalanceSnapshot?: (snapshot: BalanceSnapshot) => Promise<void> | void;
 };
 
 export class CodexNotifyRuntime {
@@ -52,6 +64,8 @@ export class CodexNotifyRuntime {
   private channels: NotificationChannel[] = [];
   private readonly recentEvents: NormalizedNotificationEvent[] = [];
   private readonly knownSessions = new Map<string, KnownSessionInfo>();
+  private latestBalanceSnapshot?: BalanceSnapshot;
+  private currentConfig?: NotifyConfig;
 
   public constructor(
     private readonly configPath: string,
@@ -88,12 +102,15 @@ export class CodexNotifyRuntime {
         hotPollIntervalMs: config.hotPollIntervalMs,
         hotSessionIdleMs: config.hotSessionIdleMs
       },
-      this.logger
+      this.logger,
+      (snapshot) => this.handleBalanceSnapshot(snapshot)
     );
 
     await watcher.start();
     this.watcher = watcher;
     this.channels = channels;
+    this.currentConfig = config;
+    this.latestBalanceSnapshot = watcher.getLatestBalanceSnapshot();
     return true;
   }
 
@@ -107,6 +124,7 @@ export class CodexNotifyRuntime {
     await this.store?.save();
     this.watcher = undefined;
     this.channels = [];
+    this.currentConfig = undefined;
     return true;
   }
 
@@ -135,7 +153,8 @@ export class CodexNotifyRuntime {
         hotPollIntervalMs: config.hotPollIntervalMs,
         hotSessionIdleMs: config.hotSessionIdleMs
       },
-      this.logger
+      this.logger,
+      (snapshot) => this.handleBalanceSnapshot(snapshot)
     );
 
     try {
@@ -163,6 +182,37 @@ export class CodexNotifyRuntime {
 
   public listHotSessions(): HotSessionSnapshot[] {
     return this.watcher?.listHotSessions() ?? [];
+  }
+
+  public getLatestBalanceSnapshot(): BalanceSnapshot | undefined {
+    return this.watcher?.getLatestBalanceSnapshot() ?? (this.latestBalanceSnapshot ? { ...this.latestBalanceSnapshot } : undefined);
+  }
+
+  public async getQuotaAlertTrigger(): Promise<QuotaAlertTriggerConfig> {
+    const { config } = await loadConfig(this.configPath);
+    this.currentConfig = this.currentConfig ?? config;
+    return structuredClone(config.quotaAlerts.trigger);
+  }
+
+  public async updateQuotaAlertTrigger(trigger: QuotaAlertTriggerConfig): Promise<QuotaAlertTriggerConfig> {
+    const rawConfig = await readRawConfigFile(this.configPath);
+    const currentConfig = await this.ensureCurrentConfig();
+    rawConfig.quotaAlerts = {
+      ...rawConfig.quotaAlerts,
+      enabled: rawConfig.quotaAlerts?.enabled ?? true,
+      bark: {
+        sound: rawConfig.quotaAlerts?.bark?.sound ?? currentConfig.quotaAlerts.bark.sound,
+        ...(rawConfig.quotaAlerts?.bark?.iconUrl ? { iconUrl: rawConfig.quotaAlerts.bark.iconUrl } : {})
+      },
+      trigger: structuredClone(trigger)
+    };
+    await writeRawConfigFile(rawConfig, this.configPath);
+
+    if (this.currentConfig) {
+      this.currentConfig.quotaAlerts.trigger = structuredClone(trigger);
+    }
+
+    return structuredClone(trigger);
   }
 
   public getRecentEvents(): NormalizedNotificationEvent[] {
@@ -319,6 +369,47 @@ export class CodexNotifyRuntime {
     this.storePath = resolvedPath;
     return store;
   }
+
+  private async handleBalanceSnapshot(snapshot: BalanceSnapshot): Promise<void> {
+    this.latestBalanceSnapshot = { ...snapshot };
+    await this.maybeSendQuotaAlerts(this.latestBalanceSnapshot);
+    await this.options.onBalanceSnapshot?.(this.latestBalanceSnapshot);
+  }
+
+  private async maybeSendQuotaAlerts(snapshot: BalanceSnapshot): Promise<void> {
+    const config = await this.ensureCurrentConfig();
+    if (!config.quotaAlerts.enabled || this.channels.length === 0) {
+      return;
+    }
+
+    const store = await this.ensureStoreLoaded();
+    const evaluation = evaluateQuotaAlerts(
+      snapshot,
+      config.quotaAlerts.trigger,
+      store.listQuotaAlertStates()
+    );
+
+    if (evaluation.alerts.length > 0) {
+      for (const alert of evaluation.alerts) {
+        await sendQuotaAlertThroughChannels(this.channels, alert, this.logger);
+      }
+    }
+
+    if (evaluation.changed) {
+      store.replaceQuotaAlertStates(evaluation.activeStates);
+      await store.save();
+    }
+  }
+
+  private async ensureCurrentConfig(): Promise<NotifyConfig> {
+    if (this.currentConfig) {
+      return this.currentConfig;
+    }
+
+    const { config } = await loadConfig(this.configPath);
+    this.currentConfig = config;
+    return config;
+  }
 }
 
 export function buildNotificationChannels(
@@ -335,7 +426,7 @@ export function buildNotificationChannels(
 
   const barkStatus = isBarkReady(config.bark);
   if (barkStatus.ok) {
-    channels.push(new BarkNotifier(config.bark, store, logger));
+    channels.push(new BarkNotifier(config, store, logger));
   } else if (config.bark.enabled) {
     logger.warn(`Skipping Bark channel: ${barkStatus.reason ?? "invalid configuration"}`);
   }

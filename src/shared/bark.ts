@@ -4,9 +4,21 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { formatBarkNotificationBody, formatBarkNotificationTitle } from "./format";
+import {
+  formatBarkNotificationBody,
+  formatBarkNotificationTitle,
+  formatQuotaAlertBody,
+  formatQuotaAlertTitle
+} from "./format";
 import { ProcessedEventStore } from "./store";
-import { BarkConfig, LoggerLike, NormalizedNotificationEvent, NotificationChannel } from "./types";
+import {
+  BarkConfig,
+  LoggerLike,
+  NormalizedNotificationEvent,
+  NotificationChannel,
+  NotifyConfig,
+  QuotaAlertEvent
+} from "./types";
 
 type BarkPushPayload = Record<string, string | number>;
 
@@ -16,16 +28,40 @@ export class BarkNotifier implements NotificationChannel {
   private iconUrlPromise?: Promise<string | undefined>;
 
   public constructor(
-    private readonly config: BarkConfig,
+    private readonly config: NotifyConfig,
     private readonly store: ProcessedEventStore,
     private readonly logger: LoggerLike
   ) {}
 
   public async send(event: NormalizedNotificationEvent): Promise<void> {
     const badge = this.store.ensureSessionBadge(event.sessionId);
-    const iconUrl = await this.resolveIconUrl();
-    const target = buildBarkRequestTarget(this.config);
-    const payload = buildBarkPayload(event, badge, iconUrl, this.config, target.includeDeviceKey);
+    const iconUrl = await this.resolveTaskIconUrl();
+    const target = buildBarkRequestTarget(this.config.bark);
+    const payload = buildBarkTaskPayload(event, badge, iconUrl, this.config.bark, target.includeDeviceKey);
+
+    const response = await fetch(target.endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`Bark responded with ${response.status}${body ? `: ${body}` : ""}`);
+    }
+  }
+
+  public async sendQuotaAlert(alert: QuotaAlertEvent): Promise<void> {
+    const target = buildBarkRequestTarget(this.config.bark);
+    const payload = buildBarkQuotaAlertPayload(
+      alert,
+      this.config.bark,
+      this.config.quotaAlerts.bark.sound,
+      this.config.quotaAlerts.bark.iconUrl,
+      target.includeDeviceKey
+    );
 
     const response = await fetch(target.endpoint, {
       method: "POST",
@@ -51,17 +87,17 @@ export class BarkNotifier implements NotificationChannel {
     this.iconUrlPromise = undefined;
   }
 
-  private resolveIconUrl(): Promise<string | undefined> {
-    if (this.config.iconUrl?.trim()) {
-      return Promise.resolve(this.config.iconUrl.trim());
+  private resolveTaskIconUrl(): Promise<string | undefined> {
+    if (this.config.bark.iconUrl?.trim()) {
+      return Promise.resolve(this.config.bark.iconUrl.trim());
     }
 
-    if (!this.config.iconFilePath?.trim()) {
+    if (!this.config.bark.iconFilePath?.trim()) {
       return Promise.resolve(undefined);
     }
 
     if (!this.iconUrlPromise) {
-      this.iconServer = new LocalIconServer(this.config, this.logger);
+      this.iconServer = new LocalIconServer(this.config.bark, this.logger);
       this.iconUrlPromise = this.iconServer.start().catch((error) => {
         this.logger.warn(`Bark icon server failed to start: ${(error as Error).message}`);
         this.iconServer = undefined;
@@ -95,7 +131,7 @@ export function isBarkReady(config: BarkConfig): { ok: boolean; reason?: string 
   return { ok: true };
 }
 
-function buildBarkPayload(
+function buildBarkTaskPayload(
   event: NormalizedNotificationEvent,
   badge: number,
   iconUrl: string | undefined,
@@ -120,6 +156,45 @@ function buildBarkPayload(
 
   if (config.isArchive) {
     encryptedPayload.isArchive = 1;
+  }
+
+  if (includeDeviceKey) {
+    encryptedPayload.device_key = config.deviceKey;
+  }
+
+  return encryptedPayload;
+}
+
+function buildBarkQuotaAlertPayload(
+  alert: QuotaAlertEvent,
+  config: BarkConfig,
+  sound: string,
+  iconUrl: string | undefined,
+  includeDeviceKey: boolean
+): BarkPushPayload {
+  const payload: BarkPushPayload = {
+    title: formatQuotaAlertTitle(),
+    body: formatQuotaAlertBody(alert),
+    sound,
+    group: formatQuotaAlertTitle()
+  };
+
+  if (iconUrl?.trim()) {
+    payload.icon = iconUrl.trim();
+  }
+
+  if (!config.encryption.enabled) {
+    return includeDeviceKey ? { device_key: config.deviceKey, ...payload } : payload;
+  }
+
+  const { ciphertext, iv } = encryptBarkPayload(JSON.stringify(payload), config);
+  const encryptedPayload: BarkPushPayload = {
+    ciphertext,
+    iv
+  };
+
+  if (iconUrl?.trim()) {
+    encryptedPayload.icon = iconUrl.trim();
   }
 
   if (includeDeviceKey) {

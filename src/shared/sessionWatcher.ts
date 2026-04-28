@@ -5,6 +5,13 @@ import * as path from "node:path";
 import { buildDefaultThreadLabel, epochSecondsToIso, previewText, projectNameFromCwd } from "./format";
 import { ProcessedEventStore } from "./store";
 import {
+  accumulateTaskResourceUsage,
+  cloneTaskResourceUsage,
+  deriveTaskResourceUsageFromTotal,
+  parseUsageEventMessage
+} from "./usage";
+import {
+  BalanceSnapshot,
   FileTracker,
   HotSessionSnapshot,
   LoggerLike,
@@ -74,13 +81,15 @@ export class CodexSessionWatcher {
   private coldPollRunning = false;
   private archiveScanRunning = false;
   private ready = false;
+  private latestBalanceSnapshot?: BalanceSnapshot;
 
   public constructor(
     private readonly sessionsRoot: string,
     private readonly store: ProcessedEventStore,
     private readonly onEvent: EventCallback,
     private readonly options: SessionWatcherOptions,
-    private readonly logger: LoggerLike
+    private readonly logger: LoggerLike,
+    private readonly onBalanceSnapshot?: (snapshot: BalanceSnapshot) => Promise<void> | void
   ) {
     this.archivedSessionsRoot = path.join(path.dirname(this.sessionsRoot), "archived_sessions");
   }
@@ -157,6 +166,7 @@ export class CodexSessionWatcher {
     tracker.turns.clear();
     tracker.activeTurnId = undefined;
     tracker.session = undefined;
+    tracker.lastSessionUsageTotal = undefined;
 
     const emitted: NormalizedNotificationEvent[] = [];
     await this.refreshFile(resolved, true, async (event) => {
@@ -164,6 +174,10 @@ export class CodexSessionWatcher {
       await this.onEvent(event);
     });
     return emitted;
+  }
+
+  public getLatestBalanceSnapshot(): BalanceSnapshot | undefined {
+    return this.latestBalanceSnapshot ? { ...this.latestBalanceSnapshot } : undefined;
   }
 
   public listHotSessions(): HotSessionSnapshot[] {
@@ -805,7 +819,13 @@ export class CodexSessionWatcher {
       return false;
     }
 
-    return this.processEventMessage(tracker, parsed.payload, emitNotifications, handler);
+    return this.processEventMessage(
+      tracker,
+      parsed.payload,
+      emitNotifications,
+      handler,
+      typeof parsed.timestamp === "string" ? parsed.timestamp : undefined
+    );
   }
 
   private isCompleteJsonLine(line: string): boolean {
@@ -847,18 +867,36 @@ export class CodexSessionWatcher {
     tracker: FileTracker,
     payload: any,
     emitNotifications: boolean,
-    handler: EventCallback
+    handler: EventCallback,
+    observedAtIso?: string
   ): Promise<boolean> {
     const payloadType = payload?.type;
 
     if (payloadType === "task_started" && typeof payload?.turn_id === "string") {
       tracker.activeTurnId = payload.turn_id;
-      this.getOrCreateTurn(tracker, payload.turn_id);
+      const turn = this.getOrCreateTurn(tracker, payload.turn_id);
+      turn.usageTotalBaseline = cloneTaskResourceUsage(tracker.lastSessionUsageTotal);
+      turn.usageTotalBaselineInitialized = true;
       return false;
     }
 
     const activeTurnId = this.resolveTurnId(tracker, payload);
     const activeTurn = activeTurnId ? this.getOrCreateTurn(tracker, activeTurnId) : undefined;
+
+    const usageEvent = parseUsageEventMessage(payload, observedAtIso);
+    if (usageEvent) {
+      if (activeTurn) {
+        this.applyUsageEvent(tracker, activeTurn, usageEvent);
+      } else if (usageEvent.taskUsageTotal) {
+        tracker.lastSessionUsageTotal = cloneTaskResourceUsage(usageEvent.taskUsageTotal);
+      }
+
+      if (usageEvent.balanceSnapshot) {
+        await this.publishBalanceSnapshot(usageEvent.balanceSnapshot);
+      }
+
+      return false;
+    }
 
     if (payloadType === "user_message" && activeTurn) {
       activeTurn.userMessage = typeof payload?.message === "string" ? payload.message : activeTurn.userMessage;
@@ -883,6 +921,10 @@ export class CodexSessionWatcher {
     const event = this.buildNotificationEvent(tracker, payload as CompletionPayload);
     if (!event) {
       return false;
+    }
+
+    if (tracker.activeTurnId === payload.turn_id) {
+      tracker.activeTurnId = undefined;
     }
 
     const alreadyProcessed = this.store.has(event.id);
@@ -948,8 +990,40 @@ export class CodexSessionWatcher {
       durationMs: payload.duration_ms,
       completedAt: payload.completed_at,
       completedAtIso: epochSecondsToIso(payload.completed_at),
-      sessionFile: tracker.filePath
+      sessionFile: tracker.filePath,
+      resourceUsage: turn?.resourceUsage
     };
+  }
+
+  private async publishBalanceSnapshot(snapshot: BalanceSnapshot): Promise<void> {
+    if (!this.shouldAcceptBalanceSnapshot(snapshot)) {
+      return;
+    }
+
+    this.latestBalanceSnapshot = { ...snapshot };
+    await this.onBalanceSnapshot?.(this.latestBalanceSnapshot);
+  }
+
+  private shouldAcceptBalanceSnapshot(snapshot: BalanceSnapshot): boolean {
+    if (!this.latestBalanceSnapshot) {
+      return true;
+    }
+
+    const currentObservedAt = this.latestBalanceSnapshot.observedAt ?? Number.NEGATIVE_INFINITY;
+    const nextObservedAt = snapshot.observedAt ?? Number.NEGATIVE_INFINITY;
+    if (nextObservedAt > currentObservedAt) {
+      return true;
+    }
+
+    if (nextObservedAt < currentObservedAt) {
+      return false;
+    }
+
+    const currentPrimary = this.latestBalanceSnapshot.primary?.usedPercent;
+    const nextPrimary = snapshot.primary?.usedPercent;
+    const currentSecondary = this.latestBalanceSnapshot.secondary?.usedPercent;
+    const nextSecondary = snapshot.secondary?.usedPercent;
+    return currentPrimary !== nextPrimary || currentSecondary !== nextSecondary;
   }
 
   private buildHotSessionSnapshot(hotSession: HotSessionState): HotSessionSnapshot | undefined {
@@ -983,6 +1057,27 @@ export class CodexSessionWatcher {
 
     const turns = Array.from(tracker.turns.values());
     return turns.at(-1);
+  }
+
+  private applyUsageEvent(
+    tracker: FileTracker,
+    turn: TurnState,
+    usageEvent: NonNullable<ReturnType<typeof parseUsageEventMessage>>
+  ): void {
+    if (usageEvent.taskUsageTotal) {
+      if (!turn.usageTotalBaselineInitialized) {
+        turn.usageTotalBaseline = cloneTaskResourceUsage(tracker.lastSessionUsageTotal);
+        turn.usageTotalBaselineInitialized = true;
+      }
+
+      turn.resourceUsage = deriveTaskResourceUsageFromTotal(usageEvent.taskUsageTotal, turn.usageTotalBaseline);
+      tracker.lastSessionUsageTotal = cloneTaskResourceUsage(usageEvent.taskUsageTotal);
+      return;
+    }
+
+    if (usageEvent.taskUsageIncrement) {
+      turn.resourceUsage = accumulateTaskResourceUsage(turn.resourceUsage, usageEvent.taskUsageIncrement);
+    }
   }
 
   private bindSessionFile(filePath: string, sessionId: string): void {

@@ -3,13 +3,24 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { NotifyConfig } from "./types";
+import { NotifyConfig, QuotaAlertTriggerConfig } from "./types";
 
 const DEFAULT_CONFIG_DIR = path.join(os.homedir(), ".codex-task-notify");
 const DEFAULT_CONFIG_PATH = path.join(DEFAULT_CONFIG_DIR, "config.json");
 const DEFAULT_STATE_PATH = path.join(DEFAULT_CONFIG_DIR, "state.json");
 const DEFAULT_SESSIONS_ROOT = path.join(os.homedir(), ".codex", "sessions");
 let envLoaded = false;
+
+const DEFAULT_QUOTA_ALERT_TRIGGER: QuotaAlertTriggerConfig = {
+  primary: {
+    metric: "remaining_percent",
+    value: 10
+  },
+  secondary: {
+    metric: "remaining_percent",
+    value: 5
+  }
+};
 
 const DEFAULT_CONFIG: NotifyConfig = {
   sessionsRoot: DEFAULT_SESSIONS_ROOT,
@@ -36,6 +47,13 @@ const DEFAULT_CONFIG: NotifyConfig = {
       iv: ""
     }
   },
+  quotaAlerts: {
+    enabled: true,
+    trigger: structuredClone(DEFAULT_QUOTA_ALERT_TRIGGER),
+    bark: {
+      sound: "horn"
+    }
+  },
   webhooks: []
 };
 
@@ -46,6 +64,10 @@ export function getDefaultConfigPath(): string {
 
 export function getDefaultConfig(): NotifyConfig {
   return structuredClone(DEFAULT_CONFIG);
+}
+
+export function getDefaultQuotaAlertTrigger(): QuotaAlertTriggerConfig {
+  return structuredClone(DEFAULT_QUOTA_ALERT_TRIGGER);
 }
 
 export async function ensureConfigFileExists(configPath: string = getDefaultConfigPath()): Promise<string> {
@@ -64,13 +86,30 @@ export async function ensureConfigFileExists(configPath: string = getDefaultConf
 export async function loadConfig(configPath: string = getDefaultConfigPath()): Promise<{ configPath: string; config: NotifyConfig }> {
   loadDotEnvIntoProcess();
   const resolvedConfigPath = await ensureConfigFileExists(configPath);
-  const raw = stripUtf8Bom(await fs.readFile(resolvedConfigPath, "utf8"));
-  const parsed = raw.trim().length > 0 ? JSON.parse(raw) as Partial<NotifyConfig> : {};
+  const parsed = await readRawConfigFile(resolvedConfigPath);
   const merged = applyEnvOverrides(mergeConfig(parsed));
   return {
     configPath: resolvedConfigPath,
     config: merged
   };
+}
+
+export async function readRawConfigFile(
+  configPath: string = getDefaultConfigPath()
+): Promise<Partial<NotifyConfig>> {
+  loadDotEnvIntoProcess();
+  const resolvedConfigPath = await ensureConfigFileExists(configPath);
+  const raw = stripUtf8Bom(await fs.readFile(resolvedConfigPath, "utf8"));
+  return raw.trim().length > 0 ? JSON.parse(raw) as Partial<NotifyConfig> : {};
+}
+
+export async function writeRawConfigFile(
+  rawConfig: Partial<NotifyConfig>,
+  configPath: string = getDefaultConfigPath()
+): Promise<void> {
+  loadDotEnvIntoProcess();
+  const resolvedConfigPath = await ensureConfigFileExists(configPath);
+  await fs.writeFile(resolvedConfigPath, `${JSON.stringify(rawConfig, null, 2)}\n`, "utf8");
 }
 
 function mergeConfig(input: Partial<NotifyConfig>): NotifyConfig {
@@ -173,6 +212,32 @@ function mergeConfig(input: Partial<NotifyConfig>): NotifyConfig {
 
       if (typeof input.bark.encryption.iv === "string") {
         config.bark.encryption.iv = input.bark.encryption.iv;
+      }
+    }
+  }
+
+  if (input.quotaAlerts) {
+    config.quotaAlerts.enabled = Boolean(input.quotaAlerts.enabled ?? config.quotaAlerts.enabled);
+
+    const trigger = input.quotaAlerts.trigger;
+    if (trigger) {
+      mergeQuotaTriggerThreshold(config.quotaAlerts.trigger.primary, trigger.primary);
+      mergeQuotaTriggerThreshold(config.quotaAlerts.trigger.secondary, trigger.secondary);
+    }
+
+    if (input.quotaAlerts.bark) {
+      if (
+        typeof input.quotaAlerts.bark.sound === "string" &&
+        input.quotaAlerts.bark.sound.trim().length > 0
+      ) {
+        config.quotaAlerts.bark.sound = input.quotaAlerts.bark.sound.trim();
+      }
+
+      if (
+        typeof input.quotaAlerts.bark.iconUrl === "string" &&
+        input.quotaAlerts.bark.iconUrl.trim().length > 0
+      ) {
+        config.quotaAlerts.bark.iconUrl = input.quotaAlerts.bark.iconUrl.trim();
       }
     }
   }
@@ -356,7 +421,42 @@ function applyEnvOverrides(config: NotifyConfig): NotifyConfig {
     config.bark.encryption.iv = value;
   });
 
+  assignBooleanEnv("CODEX_TASK_NOTIFY_QUOTA_ALERTS_ENABLED", (value) => {
+    config.quotaAlerts.enabled = value;
+  });
+  assignNumberEnv("CODEX_TASK_NOTIFY_TRIGGER_5H_REMAINING_PERCENT", 0, 100, (value) => {
+    config.quotaAlerts.trigger.primary.metric = "remaining_percent";
+    config.quotaAlerts.trigger.primary.value = value;
+  });
+  assignNumberEnv("CODEX_TASK_NOTIFY_TRIGGER_7D_REMAINING_PERCENT", 0, 100, (value) => {
+    config.quotaAlerts.trigger.secondary.metric = "remaining_percent";
+    config.quotaAlerts.trigger.secondary.value = value;
+  });
+  assignStringEnv("CODEX_TASK_NOTIFY_QUOTA_ALERT_BARK_SOUND", (value) => {
+    config.quotaAlerts.bark.sound = value;
+  });
+  assignStringEnv("CODEX_TASK_NOTIFY_QUOTA_ALERT_BARK_ICON_URL", (value) => {
+    config.quotaAlerts.bark.iconUrl = value;
+  });
+
   return config;
+}
+
+function mergeQuotaTriggerThreshold(
+  target: QuotaAlertTriggerConfig["primary"],
+  input: Partial<QuotaAlertTriggerConfig["primary"]> | undefined
+): void {
+  if (!input) {
+    return;
+  }
+
+  if (input.metric === "remaining_percent") {
+    target.metric = input.metric;
+  }
+
+  if (typeof input.value === "number" && Number.isFinite(input.value) && input.value >= 0 && input.value <= 100) {
+    target.value = input.value;
+  }
 }
 
 function assignStringEnv(name: string, assign: (value: string) => void): void {

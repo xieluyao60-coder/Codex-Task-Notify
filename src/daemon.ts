@@ -3,9 +3,13 @@ import { stdin as input, stdout as output } from "node:process";
 import { parseArgs } from "node:util";
 
 import { getDefaultConfigPath } from "./shared/config";
-import { normalizeThreadDisplayLabel } from "./shared/format";
+import {
+  formatBalanceDetails,
+  formatQuotaTriggerDetails,
+  normalizeThreadDisplayLabel
+} from "./shared/format";
 import { CONTROL_COMMAND_HELP_LINES, CodexNotifyRuntime } from "./shared/runtime";
-import { LoggerLike, RenameCandidate } from "./shared/types";
+import { LoggerLike, QuotaAlertTriggerConfig, RenameCandidate } from "./shared/types";
 
 class ConsoleLogger implements LoggerLike {
   public info(message: string): void {
@@ -96,6 +100,22 @@ class DaemonController {
       case "quit":
         await this.shutdown(0);
         return;
+      case "check":
+        if (rest[0]?.toLowerCase() === "balance") {
+          this.checkBalance();
+          return;
+        }
+        this.logger.warn(`Unknown command: ${trimmed}`);
+        this.printHelp();
+        return;
+      case "set":
+        if (rest[0]?.toLowerCase() === "trigger") {
+          await this.setTrigger(rest.slice(1));
+          return;
+        }
+        this.logger.warn(`Unknown command: ${trimmed}`);
+        this.printHelp();
+        return;
       case "add":
         await this.addSessionFile(rest);
         return;
@@ -133,6 +153,53 @@ class DaemonController {
   private async restartMonitoring(): Promise<void> {
     await this.runtime.restart();
     this.logger.info("Monitoring restarted.");
+  }
+
+  private checkBalance(): void {
+    const snapshot = this.runtime.getLatestBalanceSnapshot();
+    this.logger.info(formatBalanceDetails(snapshot));
+  }
+
+  private async setTrigger(args: string[]): Promise<void> {
+    try {
+      const currentTrigger = await this.runtime.getQuotaAlertTrigger();
+      const providedPrimary = args[0];
+      const providedSecondary = args[1];
+
+      const primaryRaw = providedPrimary && providedPrimary.trim().length > 0
+        ? providedPrimary.trim()
+        : (await this.rl.question(`5h trigger (% remaining, current ${currentTrigger.primary.value}): `)).trim();
+      if (primaryRaw.length === 0) {
+        this.logger.warn("Set trigger cancelled.");
+        return;
+      }
+
+      const primaryValue = parsePercentOrThrow(primaryRaw, "5h");
+      const secondaryRaw = providedSecondary && providedSecondary.trim().length > 0
+        ? providedSecondary.trim()
+        : (await this.rl.question(`7d trigger (% remaining, current ${currentTrigger.secondary.value}): `)).trim();
+      if (secondaryRaw.length === 0) {
+        this.logger.warn("Set trigger cancelled.");
+        return;
+      }
+
+      const secondaryValue = parsePercentOrThrow(secondaryRaw, "7d");
+      const nextTrigger: QuotaAlertTriggerConfig = {
+        primary: {
+          metric: "remaining_percent",
+          value: primaryValue
+        },
+        secondary: {
+          metric: "remaining_percent",
+          value: secondaryValue
+        }
+      };
+
+      const updatedTrigger = await this.runtime.updateQuotaAlertTrigger(nextTrigger);
+      this.logger.info(`Updated trigger: ${formatQuotaTriggerDetails(updatedTrigger)}`);
+    } catch (error) {
+      this.logger.warn((error as Error).message);
+    }
   }
 
   private async addSessionFile(args: string[]): Promise<void> {
@@ -304,3 +371,12 @@ void main().catch((error) => {
   console.error((error as Error).stack ?? String(error));
   process.exit(1);
 });
+
+function parsePercentOrThrow(input: string, label: string): number {
+  const parsed = Number.parseFloat(input);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    throw new Error(`${label} trigger must be a number between 0 and 100.`);
+  }
+
+  return parsed;
+}
