@@ -16,11 +16,18 @@ import {
   formatQuotaTriggerDetails,
   normalizeThreadDisplayLabel
 } from "../shared/format";
-import { getDefaultQuotaAlertTrigger } from "../shared/config";
+import { getDefaultQuotaAlertTrigger, writeRawConfigFile } from "../shared/config";
 import { evaluateQuotaAlerts } from "../shared/quotaAlerts";
 import { CodexSessionWatcher } from "../shared/sessionWatcher";
-import { ProcessedEventStore } from "../shared/store";
-import { LoggerLike, NormalizedNotificationEvent } from "../shared/types";
+import {
+  claimProcessedEventInStateFile,
+  evaluateQuotaAlertsInStateFile,
+  ProcessedEventStore,
+  readBalanceSnapshotsFromStateFile
+} from "../shared/store";
+import { LoggerLike, NormalizedNotificationEvent, RuntimeEventEnvelope } from "../shared/types";
+import { VscodeDaemonClient } from "../shared/vscodeDaemonClient";
+import { VscodeDaemonHost } from "../shared/vscodeDaemonHost";
 
 class SilentLogger implements LoggerLike {
   public info(_message: string): void {}
@@ -535,6 +542,26 @@ async function main(): Promise<void> {
   assert.equal(latestBalance?.secondary?.usedPercent, 39);
   assert.equal(formatBalanceButtonText(latestBalance), "$(pulse) 5h 83% | 7d 61%");
   assert.match(formatBalanceDetails(latestBalance), /5h: 83% remaining \(17% used\)/);
+  assert.equal(labelStore.upsertBalanceSnapshot({
+    provider: "session-log",
+    accountKey: "account-A",
+    accountLabel: "a@example.com",
+    observedAt: 1777200400,
+    observedAtIso: "2026-04-27T00:06:40.000Z",
+    primary: {
+      usedPercent: 43,
+      windowMinutes: 300
+    },
+    secondary: {
+      usedPercent: 7,
+      windowMinutes: 10080
+    }
+  }, 1777200400), true);
+  await labelStore.save();
+  const persistedBalanceSnapshots = await readBalanceSnapshotsFromStateFile(path.join(tempRoot, "labels.json"));
+  assert.equal(persistedBalanceSnapshots.length, 1);
+  assert.equal(persistedBalanceSnapshots[0]?.accountKey, "account-A");
+  assert.equal(labelStore.getLatestBalanceSnapshot("account-A")?.accountLabel, "a@example.com");
 
   const trigger = getDefaultQuotaAlertTrigger();
   const firstAlertEvaluation = evaluateQuotaAlerts(
@@ -555,6 +582,8 @@ async function main(): Promise<void> {
     []
   );
   assert.equal(firstAlertEvaluation.alerts.length, 2);
+  assert.equal(firstAlertEvaluation.alerts[0]?.stage, "threshold");
+  assert.equal(firstAlertEvaluation.alerts[1]?.stage, "threshold");
   assert.equal(formatQuotaAlertTitle(), "Codex限额警告");
   assert.equal(formatQuotaAlertBody(firstAlertEvaluation.alerts[0]!), "您的Codex 5h额度只剩8%");
   assert.equal(formatQuotaAlertBody(firstAlertEvaluation.alerts[1]!), "您的Codex 7d额度只剩4%");
@@ -579,6 +608,68 @@ async function main(): Promise<void> {
   );
   assert.equal(repeatedAlertEvaluation.alerts.length, 0);
 
+  const zeroAlertEvaluation = evaluateQuotaAlerts(
+    {
+      provider: "session-log",
+      observedAt: 1777200270,
+      observedAtIso: "2026-04-27T00:04:30.000Z",
+      primary: {
+        usedPercent: 100,
+        windowMinutes: 300
+      },
+      secondary: {
+        usedPercent: 100,
+        windowMinutes: 10080
+      }
+    },
+    trigger,
+    repeatedAlertEvaluation.activeStates
+  );
+  assert.equal(zeroAlertEvaluation.alerts.length, 2);
+  assert.equal(zeroAlertEvaluation.alerts[0]?.stage, "zero");
+  assert.equal(zeroAlertEvaluation.alerts[1]?.stage, "zero");
+
+  const repeatedZeroAlertEvaluation = evaluateQuotaAlerts(
+    {
+      provider: "session-log",
+      observedAt: 1777200275,
+      observedAtIso: "2026-04-27T00:04:35.000Z",
+      primary: {
+        usedPercent: 100,
+        windowMinutes: 300
+      },
+      secondary: {
+        usedPercent: 100,
+        windowMinutes: 10080
+      }
+    },
+    trigger,
+    zeroAlertEvaluation.activeStates
+  );
+  assert.equal(repeatedZeroAlertEvaluation.alerts.length, 0);
+
+  const switchedAccountAlertEvaluation = evaluateQuotaAlerts(
+    {
+      provider: "session-log",
+      accountKey: "account-B",
+      observedAt: 1777200280,
+      observedAtIso: "2026-04-27T00:04:40.000Z",
+      primary: {
+        usedPercent: 93,
+        windowMinutes: 300
+      },
+      secondary: {
+        usedPercent: 97,
+        windowMinutes: 10080
+      }
+    },
+    trigger,
+    firstAlertEvaluation.activeStates
+  );
+  assert.equal(switchedAccountAlertEvaluation.alerts.length, 2);
+  assert.equal(switchedAccountAlertEvaluation.alerts[0]?.stage, "threshold");
+  assert.equal(switchedAccountAlertEvaluation.alerts[1]?.stage, "threshold");
+
   const resetAlertEvaluation = evaluateQuotaAlerts(
     {
       provider: "session-log",
@@ -598,8 +689,268 @@ async function main(): Promise<void> {
   );
   assert.equal(resetAlertEvaluation.activeStates.length, 0);
 
+  const claimStatePath = path.join(tempRoot, "claims.json");
+  const parallelClaimResults = await Promise.all(
+    Array.from({ length: 8 }, () => claimProcessedEventInStateFile(claimStatePath, "session-claim:turn-1"))
+  );
+  assert.equal(parallelClaimResults.filter(Boolean).length, 1);
+  assert.equal(await claimProcessedEventInStateFile(claimStatePath, "session-claim:turn-1"), false);
+  const overwriteClaimStore = new ProcessedEventStore(claimStatePath);
+  await overwriteClaimStore.load();
+  await overwriteClaimStore.save();
+  assert.equal(await claimProcessedEventInStateFile(claimStatePath, "session-claim:turn-1"), false);
+
+  const quotaClaimStatePath = path.join(tempRoot, "quota-claims.json");
+  const thresholdQuotaSnapshot = {
+    provider: "session-log",
+    observedAt: 1777200340,
+    observedAtIso: "2026-04-27T00:05:40.000Z",
+    primary: {
+      usedPercent: 92,
+      windowMinutes: 300
+    },
+    secondary: {
+      usedPercent: 96,
+      windowMinutes: 10080
+    }
+  };
+  const parallelThresholdQuotaResults = await Promise.all(
+    Array.from({ length: 4 }, () => evaluateQuotaAlertsInStateFile(quotaClaimStatePath, thresholdQuotaSnapshot, trigger))
+  );
+  assert.equal(parallelThresholdQuotaResults.reduce((sum, result) => sum + result.alerts.length, 0), 2);
+
+  const zeroQuotaSnapshot = {
+    provider: "session-log",
+    observedAt: 1777200350,
+    observedAtIso: "2026-04-27T00:05:50.000Z",
+    primary: {
+      usedPercent: 100,
+      windowMinutes: 300
+    },
+    secondary: {
+      usedPercent: 100,
+      windowMinutes: 10080
+    }
+  };
+  const parallelZeroQuotaResults = await Promise.all(
+    Array.from({ length: 4 }, () => evaluateQuotaAlertsInStateFile(quotaClaimStatePath, zeroQuotaSnapshot, trigger))
+  );
+  assert.equal(parallelZeroQuotaResults.reduce((sum, result) => sum + result.alerts.length, 0), 2);
+
+  const repeatedZeroQuotaResults = await Promise.all(
+    Array.from({ length: 4 }, () => evaluateQuotaAlertsInStateFile(quotaClaimStatePath, zeroQuotaSnapshot, trigger))
+  );
+  assert.equal(repeatedZeroQuotaResults.reduce((sum, result) => sum + result.alerts.length, 0), 0);
+
   await watcher.stop();
   await store.save();
+
+  const daemonRoot = path.join(tempRoot, "vscode-daemon");
+  const daemonSessionsRoot = path.join(daemonRoot, "sessions");
+  const daemonStateFilePath = path.join(daemonRoot, "state.json");
+  const daemonConfigPath = path.join(daemonRoot, "config.json");
+  const daemonMetadataPath = path.join(daemonRoot, "vscode-daemon.json");
+  const daemonPipePath = process.platform === "win32"
+    ? `\\\\.\\pipe\\codex-task-notify-test-${Date.now()}`
+    : path.join(daemonRoot, "vscode-daemon.sock");
+
+  const savedCodexEnv = snapshotCodexTaskNotifyEnv();
+  process.env.CODEX_TASK_NOTIFY_ENV = path.join(daemonRoot, "missing.env");
+  clearCodexTaskNotifyEnv();
+  process.env.CODEX_TASK_NOTIFY_ENV = path.join(daemonRoot, "missing.env");
+
+  try {
+    await writeRawConfigFile(
+      {
+        sessionsRoot: daemonSessionsRoot,
+        stateFilePath: daemonStateFilePath,
+        coldPollIntervalMs: 1000,
+        hotPollIntervalMs: 500,
+        hotSessionIdleMs: 2000,
+        vscode: {
+          idePopupEnabled: true,
+          maxRecentEvents: 10
+        },
+        desktop: {
+          enabled: false,
+          sound: false
+        },
+        bark: {
+          enabled: false,
+          serverUrl: "https://api.day.app",
+          deviceKey: "",
+          sound: "multiwayinvitation",
+          isArchive: true,
+          iconServerPort: 17892,
+          encryption: {
+            enabled: true,
+            key: "",
+            iv: ""
+          }
+        }
+      },
+      daemonConfigPath
+    );
+
+    const daemonEvents: RuntimeEventEnvelope[] = [];
+    const host = new VscodeDaemonHost(
+      daemonConfigPath,
+      new SilentLogger(),
+      {
+        pipePath: daemonPipePath,
+        metadataPath: daemonMetadataPath
+      }
+    );
+    assert.equal(await host.start(), true);
+
+    const client = new VscodeDaemonClient({
+      daemonEntryPath: path.join(daemonRoot, "unused-daemon-entry.js"),
+      configPath: daemonConfigPath,
+      pipePath: daemonPipePath,
+      logger: new SilentLogger(),
+      onEvent: async (event) => {
+        daemonEvents.push(event);
+      }
+    });
+
+    const daemonInitialStatus = await client.getStatus();
+    assert.equal(daemonInitialStatus.running, false);
+    const daemonStartedStatus = await client.startMonitoring();
+    assert.equal(daemonStartedStatus.running, true);
+    assert.equal(daemonStartedStatus.deliveryWays.idePopupEnabled, true);
+
+    const daemonSessionFile = path.join(getTodaySessionDirectory(daemonSessionsRoot), "rollout-daemon.jsonl");
+    await fs.mkdir(path.dirname(daemonSessionFile), { recursive: true });
+    await fs.writeFile(
+      daemonSessionFile,
+      [
+        toJsonLine({
+          type: "session_meta",
+          payload: {
+            id: "session-daemon",
+            source: "vscode",
+            originator: "codex_vscode",
+            cwd: "D:\\daemon-project"
+          }
+        }),
+        toJsonLine({
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "daemon-turn-0"
+          }
+        }),
+        toJsonLine({
+          type: "turn_context",
+          payload: {
+            turn_id: "daemon-turn-0",
+            cwd: "D:\\daemon-project"
+          }
+        }),
+        toJsonLine({
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "daemon seed prompt"
+          }
+        }),
+        toJsonLine({
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "daemon seed answer"
+          }
+        }),
+        toJsonLine({
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "daemon-turn-0",
+            last_agent_message: "daemon seed answer",
+            completed_at: 1777200500,
+            duration_ms: 1000
+          }
+        }),
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await client.addSessionFile(daemonSessionFile);
+    await fs.appendFile(
+      daemonSessionFile,
+      [
+        toJsonLine({
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "daemon-turn-1"
+          }
+        }),
+        toJsonLine({
+          type: "turn_context",
+          payload: {
+            turn_id: "daemon-turn-1",
+            cwd: "D:\\daemon-project"
+          }
+        }),
+        toJsonLine({
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "daemon session prompt"
+          }
+        }),
+        toJsonLine({
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "daemon session answer"
+          }
+        }),
+        toJsonLine({
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "daemon-turn-1",
+            last_agent_message: "daemon session answer",
+            completed_at: 1777200501,
+            duration_ms: 1000
+          }
+        }),
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    await waitFor(
+      () => daemonEvents.some((event) => event.type === "task_completed"),
+      6_000,
+      "daemon task event"
+    );
+    const daemonTaskPayload = daemonEvents.find((event) => event.type === "task_completed")?.payload as
+      | { event: NormalizedNotificationEvent }
+      | undefined;
+    assert.equal(daemonTaskPayload?.event.id, "session-daemon:daemon-turn-1");
+
+    const daemonStatusAfterEvent = await client.getStatus();
+    assert.equal(daemonStatusAfterEvent.recentEvents[0]?.threadLabel, "daemon session prompt");
+
+    const daemonDeliveryStatus = await client.chooseDeliveryWays({
+      idePopupEnabled: false,
+      desktopEnabled: false,
+      barkEnabled: false
+    });
+    assert.equal(daemonDeliveryStatus.deliveryWays.idePopupEnabled, false);
+
+    assert.equal(await client.renameSessionLabel("session-daemon", "daemon alias"), "daemon alias");
+    const daemonStatusAfterRename = await client.getStatus();
+    assert.equal(daemonStatusAfterRename.recentEvents[0]?.threadLabel, "daemon alias");
+
+    await client.dispose();
+    await host.shutdown();
+  } finally {
+    restoreCodexTaskNotifyEnv(savedCodexEnv);
+  }
 
   console.log("Smoke test passed.");
 }
@@ -672,6 +1023,31 @@ function getTodaySessionDirectory(sessionsRoot: string, date: Date = new Date())
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0")
   );
+}
+
+function snapshotCodexTaskNotifyEnv(): Record<string, string | undefined> {
+  return Object.fromEntries(
+    Object.entries(process.env)
+      .filter(([key]) => key.startsWith("CODEX_TASK_NOTIFY_"))
+      .map(([key, value]) => [key, value])
+  );
+}
+
+function clearCodexTaskNotifyEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("CODEX_TASK_NOTIFY_")) {
+      delete process.env[key];
+    }
+  }
+}
+
+function restoreCodexTaskNotifyEnv(saved: Record<string, string | undefined>): void {
+  clearCodexTaskNotifyEnv();
+  for (const [key, value] of Object.entries(saved)) {
+    if (value !== undefined) {
+      process.env[key] = value;
+    }
+  }
 }
 
 void main().catch((error) => {

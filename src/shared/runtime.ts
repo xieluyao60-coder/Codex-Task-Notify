@@ -1,3 +1,8 @@
+import * as fsSync from "node:fs";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
+import { resolveCurrentCodexAccountIdentity } from "./account";
 import { loadConfig, readRawConfigFile, writeRawConfigFile } from "./config";
 import { BarkNotifier, isBarkReady } from "./bark";
 import {
@@ -7,10 +12,18 @@ import {
   DesktopNotifier,
   WebhookNotifier
 } from "./notifications";
-import { evaluateQuotaAlerts } from "./quotaAlerts";
 import { CodexSessionWatcher } from "./sessionWatcher";
-import { ProcessedEventStore, SessionLabelRecord } from "./store";
 import {
+  BalanceSnapshotRecord,
+  claimProcessedEventInStateFile,
+  evaluateQuotaAlertsInStateFile,
+  ProcessedEventStore,
+  readBalanceSnapshotsFromStateFile,
+  SessionLabelRecord
+} from "./store";
+import { extractLatestBalanceSnapshotFromJsonlText } from "./usage";
+import {
+  AccountIdentity,
   BalanceSnapshot,
   HotSessionSnapshot,
   KnownSessionInfo,
@@ -55,6 +68,7 @@ export type CodexNotifyRuntimeOptions = {
   ) => Promise<void> | void;
   logResolvedEvent?: (event: NormalizedNotificationEvent) => Promise<void> | void;
   onBalanceSnapshot?: (snapshot: BalanceSnapshot) => Promise<void> | void;
+  onQuotaAlert?: (alert: import("./types").QuotaAlertEvent) => Promise<void> | void;
 };
 
 export class CodexNotifyRuntime {
@@ -66,6 +80,10 @@ export class CodexNotifyRuntime {
   private readonly knownSessions = new Map<string, KnownSessionInfo>();
   private latestBalanceSnapshot?: BalanceSnapshot;
   private currentConfig?: NotifyConfig;
+  private sharedStateWatcher?: fsSync.FSWatcher;
+  private sharedStateReloadTimer?: NodeJS.Timeout;
+  private sharedStateWatcherDirectory?: string;
+  private sharedStateWatcherBasename?: string;
 
   public constructor(
     private readonly configPath: string,
@@ -84,6 +102,7 @@ export class CodexNotifyRuntime {
 
     const { config } = await loadConfig(this.configPath);
     const store = await this.prepareStore(config.stateFilePath);
+    await this.startSharedStateWatcher(config.stateFilePath);
     const channels = buildNotificationChannels(
       config,
       store,
@@ -111,6 +130,7 @@ export class CodexNotifyRuntime {
     this.channels = channels;
     this.currentConfig = config;
     this.latestBalanceSnapshot = watcher.getLatestBalanceSnapshot();
+    await this.refreshLatestBalanceSnapshotFromStore();
     return true;
   }
 
@@ -120,6 +140,12 @@ export class CodexNotifyRuntime {
     }
 
     await this.watcher.stop();
+    this.sharedStateWatcher?.close();
+    this.sharedStateWatcher = undefined;
+    if (this.sharedStateReloadTimer) {
+      clearTimeout(this.sharedStateReloadTimer);
+      this.sharedStateReloadTimer = undefined;
+    }
     await disposeChannels(this.channels, this.logger);
     await this.store?.save();
     this.watcher = undefined;
@@ -185,7 +211,61 @@ export class CodexNotifyRuntime {
   }
 
   public getLatestBalanceSnapshot(): BalanceSnapshot | undefined {
-    return this.watcher?.getLatestBalanceSnapshot() ?? (this.latestBalanceSnapshot ? { ...this.latestBalanceSnapshot } : undefined);
+    return this.latestBalanceSnapshot
+      ? { ...this.latestBalanceSnapshot }
+      : this.watcher?.getLatestBalanceSnapshot();
+  }
+
+  public async refreshLatestBalanceSnapshotFromStore(): Promise<BalanceSnapshot | undefined> {
+    return this.refreshLatestBalanceSnapshotFromStoreInternal(true);
+  }
+
+  public async peekLatestBalanceSnapshotFromStore(): Promise<BalanceSnapshot | undefined> {
+    return this.refreshLatestBalanceSnapshotFromStoreInternal(false);
+  }
+
+  private async refreshLatestBalanceSnapshotFromStoreInternal(
+    notifyListener: boolean
+  ): Promise<BalanceSnapshot | undefined> {
+    const { config } = await loadConfig(this.configPath);
+    this.currentConfig = this.currentConfig ?? config;
+    const account = await resolveCurrentCodexAccountIdentity();
+    const records = await readBalanceSnapshotsFromStateFile(config.stateFilePath);
+    const snapshot = this.selectBalanceSnapshotForAccount(records, account);
+    if (!snapshot) {
+      return this.getLatestBalanceSnapshot();
+    }
+
+    if (!this.shouldAdoptBalanceSnapshot(snapshot)) {
+      return this.getLatestBalanceSnapshot();
+    }
+
+    this.latestBalanceSnapshot = { ...snapshot };
+    if (notifyListener) {
+      await this.options.onBalanceSnapshot?.(this.latestBalanceSnapshot);
+    }
+    return this.getLatestBalanceSnapshot();
+  }
+
+  public async refreshBalanceSnapshot(preferredFilePath?: string): Promise<BalanceSnapshot | undefined> {
+    const balanceFilePath = preferredFilePath?.trim() || await this.resolvePreferredBalanceSessionFile();
+    if (!balanceFilePath) {
+      return this.refreshLatestBalanceSnapshotFromStore();
+    }
+
+    let snapshot: BalanceSnapshot | undefined;
+    try {
+      snapshot = await this.readLatestBalanceSnapshotFromFile(balanceFilePath);
+    } catch (error) {
+      this.logger.warn(`Failed to refresh balance from ${balanceFilePath}: ${(error as Error).message}`);
+      return this.refreshLatestBalanceSnapshotFromStore();
+    }
+    if (!snapshot) {
+      return this.refreshLatestBalanceSnapshotFromStore();
+    }
+
+    await this.handleBalanceSnapshot(snapshot);
+    return this.getLatestBalanceSnapshot();
   }
 
   public async getQuotaAlertTrigger(): Promise<QuotaAlertTriggerConfig> {
@@ -302,7 +382,15 @@ export class CodexNotifyRuntime {
       this.recentEvents.unshift(resolvedEvent);
       this.recentEvents.splice(this.resolveMaxRecentEvents());
 
+      const claimed = await claimProcessedEventInStateFile(this.resolveRuntimeStateFilePath(), resolvedEvent.id);
+      if (!claimed) {
+        this.logger.info(`Skipped duplicate notification event: ${resolvedEvent.id}`);
+        return;
+      }
+
+      store.add(resolvedEvent.id);
       await this.options.logResolvedEvent?.(resolvedEvent);
+      await this.refreshBalanceSnapshot(resolvedEvent.sessionFile);
       await sendThroughChannels(channels, resolvedEvent, this.logger);
       await this.options.onResolvedEvent?.(resolvedEvent, { hadManualAlias });
     };
@@ -371,7 +459,12 @@ export class CodexNotifyRuntime {
   }
 
   private async handleBalanceSnapshot(snapshot: BalanceSnapshot): Promise<void> {
-    this.latestBalanceSnapshot = { ...snapshot };
+    const store = await this.ensureStoreLoaded();
+    const enrichedSnapshot = await this.enrichBalanceSnapshot(snapshot);
+    this.latestBalanceSnapshot = { ...enrichedSnapshot };
+    if (store.upsertBalanceSnapshot(this.latestBalanceSnapshot, this.latestBalanceSnapshot.observedAt ?? Date.now())) {
+      await store.save();
+    }
     await this.maybeSendQuotaAlerts(this.latestBalanceSnapshot);
     await this.options.onBalanceSnapshot?.(this.latestBalanceSnapshot);
   }
@@ -382,23 +475,28 @@ export class CodexNotifyRuntime {
       return;
     }
 
-    const store = await this.ensureStoreLoaded();
-    const evaluation = evaluateQuotaAlerts(
+    const evaluation = await evaluateQuotaAlertsInStateFile(
+      this.resolveRuntimeStateFilePath(),
       snapshot,
-      config.quotaAlerts.trigger,
-      store.listQuotaAlertStates()
+      config.quotaAlerts.trigger
     );
+    const store = await this.ensureStoreLoaded();
+    store.replaceQuotaAlertStates(evaluation.activeStates);
 
     if (evaluation.alerts.length > 0) {
       for (const alert of evaluation.alerts) {
         await sendQuotaAlertThroughChannels(this.channels, alert, this.logger);
+        await this.options.onQuotaAlert?.(alert);
       }
     }
+  }
 
-    if (evaluation.changed) {
-      store.replaceQuotaAlertStates(evaluation.activeStates);
-      await store.save();
+  private resolveRuntimeStateFilePath(): string {
+    if (!this.storePath) {
+      throw new Error("State store is not initialized.");
     }
+
+    return this.storePath;
   }
 
   private async ensureCurrentConfig(): Promise<NotifyConfig> {
@@ -410,6 +508,150 @@ export class CodexNotifyRuntime {
     this.currentConfig = config;
     return config;
   }
+
+  private async enrichBalanceSnapshot(snapshot: BalanceSnapshot): Promise<BalanceSnapshot> {
+    const account = await resolveCurrentCodexAccountIdentity();
+    if (!account) {
+      return { ...snapshot };
+    }
+
+    return attachAccountIdentity(snapshot, account);
+  }
+
+  private async startSharedStateWatcher(stateFilePath: string): Promise<void> {
+    const watchDirectory = path.dirname(stateFilePath);
+    const watchBasename = path.basename(stateFilePath);
+    if (
+      this.sharedStateWatcher &&
+      this.sharedStateWatcherDirectory === watchDirectory &&
+      this.sharedStateWatcherBasename === watchBasename
+    ) {
+      return;
+    }
+
+    await fs.mkdir(watchDirectory, { recursive: true });
+    this.sharedStateWatcher?.close();
+    this.sharedStateWatcherDirectory = watchDirectory;
+    this.sharedStateWatcherBasename = watchBasename;
+    this.sharedStateWatcher = fsSync.watch(watchDirectory, (_eventType, filename) => {
+      if (!filename || filename.toString() !== watchBasename) {
+        return;
+      }
+
+      this.scheduleSharedStateReload();
+    });
+    this.sharedStateWatcher.on("error", (error) => {
+      this.logger.error(`Shared state watcher error: ${(error as Error).message}`);
+    });
+  }
+
+  private scheduleSharedStateReload(): void {
+    if (this.sharedStateReloadTimer) {
+      return;
+    }
+
+    this.sharedStateReloadTimer = setTimeout(() => {
+      this.sharedStateReloadTimer = undefined;
+      void this.refreshLatestBalanceSnapshotFromStore();
+    }, 100);
+    this.sharedStateReloadTimer.unref?.();
+  }
+
+  private shouldAdoptBalanceSnapshot(snapshot: BalanceSnapshot): boolean {
+    const current = this.latestBalanceSnapshot;
+    if (!current) {
+      return true;
+    }
+
+    if ((snapshot.accountKey ?? "") !== (current.accountKey ?? "")) {
+      return true;
+    }
+
+    const currentObservedAt = current.observedAt ?? Number.NEGATIVE_INFINITY;
+    const nextObservedAt = snapshot.observedAt ?? Number.NEGATIVE_INFINITY;
+    if (nextObservedAt > currentObservedAt) {
+      return true;
+    }
+    if (nextObservedAt < currentObservedAt) {
+      return false;
+    }
+
+    return JSON.stringify(snapshot) !== JSON.stringify(current);
+  }
+
+  private selectBalanceSnapshotForAccount(
+    records: BalanceSnapshotRecord[],
+    account?: AccountIdentity
+  ): BalanceSnapshot | undefined {
+    if (records.length === 0) {
+      return undefined;
+    }
+
+    if (account) {
+      const exact = records.find((record) => record.accountKey === account.accountKey);
+      if (exact) {
+        return attachAccountIdentity(exact.snapshot, account);
+      }
+    }
+
+    return { ...records[0].snapshot };
+  }
+
+  private async resolvePreferredBalanceSessionFile(): Promise<string | undefined> {
+    const mostRecentEventFile = this.recentEvents[0]?.sessionFile?.trim();
+    if (mostRecentEventFile) {
+      return mostRecentEventFile;
+    }
+
+    const hotSessions = this.watcher?.listHotSessions() ?? [];
+    if (hotSessions.length > 0) {
+      return hotSessions[0]?.filePath;
+    }
+
+    const store = await this.ensureStoreLoaded();
+    const candidate = store
+      .listSessionCatalog()
+      .find((record) => !record.archived);
+    return candidate?.filePath;
+  }
+
+  private async readLatestBalanceSnapshotFromFile(filePath: string): Promise<BalanceSnapshot | undefined> {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) {
+      return undefined;
+    }
+
+    const fileHandle = await fs.open(filePath, "r");
+    try {
+      const chunkSizes = [128 * 1024, 512 * 1024, 2 * 1024 * 1024];
+      for (const chunkSize of chunkSizes) {
+        const readLength = Math.min(chunkSize, stat.size);
+        const buffer = Buffer.alloc(readLength);
+        const start = Math.max(0, stat.size - readLength);
+        await fileHandle.read(buffer, 0, readLength, start);
+        const snapshot = extractLatestBalanceSnapshotFromJsonlText(buffer.toString("utf8"));
+        if (snapshot) {
+          return snapshot;
+        }
+      }
+    } finally {
+      await fileHandle.close();
+    }
+
+    return undefined;
+  }
+}
+
+function attachAccountIdentity(snapshot: BalanceSnapshot, account: AccountIdentity): BalanceSnapshot {
+  return {
+    ...snapshot,
+    accountKey: account.accountKey,
+    accountLabel: account.accountLabel,
+    accountId: account.accountId,
+    accountEmail: account.accountEmail,
+    authMode: account.authMode,
+    planType: snapshot.planType ?? account.planType ?? null
+  };
 }
 
 export function buildNotificationChannels(

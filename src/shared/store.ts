@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import { QuotaAlertState } from "./types";
+import { evaluateQuotaAlerts } from "./quotaAlerts";
+import { BalanceSnapshot, QuotaAlertEvent, QuotaAlertState, QuotaAlertTriggerConfig } from "./types";
 
 interface PersistedState {
   processedEventIds: string[];
@@ -10,6 +12,7 @@ interface PersistedState {
   manualHotSessions?: Record<string, PersistedManualHotSession>;
   sessionCatalog?: Record<string, PersistedSessionCatalogRecord>;
   quotaAlertStates?: Record<string, PersistedQuotaAlertState>;
+  balanceSnapshots?: Record<string, PersistedBalanceSnapshotRecord>;
 }
 
 interface PersistedSessionLabel {
@@ -37,9 +40,16 @@ interface PersistedQuotaAlertState {
   provider: string;
   windowKey: QuotaAlertState["windowKey"];
   metric: QuotaAlertState["metric"];
+  stage?: QuotaAlertState["stage"];
   remainingValue: number;
   observedAt?: number;
   observedAtIso?: string;
+}
+
+interface PersistedBalanceSnapshotRecord {
+  accountKey: string;
+  snapshot: BalanceSnapshot;
+  updatedAtMs: number;
 }
 
 export interface SessionLabelRecord {
@@ -63,7 +73,21 @@ export interface SessionCatalogRecord {
   updatedAtMs: number;
 }
 
+export interface BalanceSnapshotRecord {
+  accountKey: string;
+  snapshot: BalanceSnapshot;
+  updatedAtMs: number;
+}
+
+export interface StoredQuotaAlertEvaluation {
+  alerts: QuotaAlertEvent[];
+  activeStates: QuotaAlertState[];
+  changed: boolean;
+}
+
 const RECENT_MANUAL_HOT_SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const STORE_LOCK_TIMEOUT_MS = 10_000;
+const STORE_LOCK_STALE_MS = 30_000;
 
 export class ProcessedEventStore {
   private readonly processed = new Set<string>();
@@ -72,6 +96,7 @@ export class ProcessedEventStore {
   private readonly manualHotSessions = new Map<string, PersistedManualHotSession>();
   private readonly sessionCatalog = new Map<string, PersistedSessionCatalogRecord>();
   private readonly quotaAlertStates = new Map<string, PersistedQuotaAlertState>();
+  private readonly balanceSnapshots = new Map<string, PersistedBalanceSnapshotRecord>();
   private nextBadge = 1;
 
   public constructor(
@@ -177,12 +202,32 @@ export class ProcessedEventStore {
           provider: record.provider.trim(),
           windowKey: record.windowKey,
           metric: record.metric,
+          stage: record.stage === "zero" ? "zero" : "threshold",
           remainingValue: record.remainingValue,
           observedAt: Number.isFinite(record.observedAt) ? Math.floor(record.observedAt!) : undefined,
           observedAtIso:
             typeof record.observedAtIso === "string" && record.observedAtIso.trim().length > 0
               ? record.observedAtIso.trim()
               : undefined
+        });
+      }
+
+      for (const [accountKey, record] of Object.entries(parsed.balanceSnapshots ?? {})) {
+        if (
+          typeof record?.accountKey !== "string" ||
+          record.accountKey.trim().length === 0 ||
+          !record.snapshot ||
+          typeof record.snapshot !== "object" ||
+          !Number.isFinite(record.updatedAtMs)
+        ) {
+          continue;
+        }
+
+        const normalizedAccountKey = record.accountKey.trim();
+        this.balanceSnapshots.set(normalizedAccountKey, {
+          accountKey: normalizedAccountKey,
+          snapshot: normalizeBalanceSnapshotRecord(record.snapshot, normalizedAccountKey),
+          updatedAtMs: Math.floor(record.updatedAtMs)
         });
       }
 
@@ -387,7 +432,10 @@ export class ProcessedEventStore {
   }
 
   public listQuotaAlertStates(): QuotaAlertState[] {
-    return Array.from(this.quotaAlertStates.values()).map((record) => ({ ...record }));
+    return Array.from(this.quotaAlertStates.values()).map((record) => ({
+      ...record,
+      stage: record.stage === "zero" ? "zero" : "threshold"
+    }));
   }
 
   public replaceQuotaAlertStates(states: QuotaAlertState[]): boolean {
@@ -413,6 +461,43 @@ export class ProcessedEventStore {
     return true;
   }
 
+  public upsertBalanceSnapshot(snapshot: BalanceSnapshot, updatedAtMs: number = Date.now()): boolean {
+    const accountKey = normalizeBalanceAccountKey(snapshot.accountKey);
+    const normalizedSnapshot = normalizeBalanceSnapshotRecord(snapshot, accountKey);
+    const existing = this.balanceSnapshots.get(accountKey);
+    const nextRecord: PersistedBalanceSnapshotRecord = {
+      accountKey,
+      snapshot: normalizedSnapshot,
+      updatedAtMs: Math.floor(updatedAtMs)
+    };
+
+    if (
+      existing &&
+      JSON.stringify(existing.snapshot) === JSON.stringify(nextRecord.snapshot) &&
+      existing.updatedAtMs === nextRecord.updatedAtMs
+    ) {
+      return false;
+    }
+
+    this.balanceSnapshots.set(accountKey, nextRecord);
+    return true;
+  }
+
+  public getLatestBalanceSnapshot(accountKey: string): BalanceSnapshot | undefined {
+    const record = this.balanceSnapshots.get(accountKey.trim());
+    return record ? cloneBalanceSnapshot(record.snapshot) : undefined;
+  }
+
+  public listBalanceSnapshots(): BalanceSnapshotRecord[] {
+    return Array.from(this.balanceSnapshots.values())
+      .map((record) => ({
+        accountKey: record.accountKey,
+        snapshot: cloneBalanceSnapshot(record.snapshot),
+        updatedAtMs: record.updatedAtMs
+      }))
+      .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+  }
+
   public async save(): Promise<void> {
     await fs.mkdir(path.dirname(this.stateFilePath), { recursive: true });
     this.pruneOldManualHotSessions();
@@ -423,7 +508,8 @@ export class ProcessedEventStore {
         sessionBadges: Object.fromEntries(this.sessionBadges.entries()),
         manualHotSessions: Object.fromEntries(this.manualHotSessions.entries()),
         sessionCatalog: Object.fromEntries(this.sessionCatalog.entries()),
-        quotaAlertStates: Object.fromEntries(this.quotaAlertStates.entries())
+        quotaAlertStates: Object.fromEntries(this.quotaAlertStates.entries()),
+        balanceSnapshots: Object.fromEntries(this.balanceSnapshots.entries())
       },
       null,
       2
@@ -466,4 +552,159 @@ function normalizeFilePath(filePath: string): string {
   }
 
   return normalized;
+}
+
+export async function readBalanceSnapshotsFromStateFile(stateFilePath: string): Promise<BalanceSnapshotRecord[]> {
+  try {
+    const raw = await fs.readFile(stateFilePath, "utf8");
+    let parsed: PersistedState;
+    try {
+      parsed = JSON.parse(raw) as PersistedState;
+    } catch {
+      return [];
+    }
+    const records: BalanceSnapshotRecord[] = [];
+    for (const [accountKey, record] of Object.entries(parsed.balanceSnapshots ?? {})) {
+      if (
+        typeof record?.accountKey !== "string" ||
+        record.accountKey.trim().length === 0 ||
+        !record.snapshot ||
+        typeof record.snapshot !== "object" ||
+        !Number.isFinite(record.updatedAtMs)
+      ) {
+        continue;
+      }
+
+      const normalizedAccountKey = accountKey.trim();
+      records.push({
+        accountKey: normalizedAccountKey,
+        snapshot: normalizeBalanceSnapshotRecord(record.snapshot, normalizedAccountKey),
+        updatedAtMs: Math.floor(record.updatedAtMs)
+      });
+    }
+
+    return records.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+export async function claimProcessedEventInStateFile(
+  stateFilePath: string,
+  eventId: string
+): Promise<boolean> {
+  const store = new ProcessedEventStore(stateFilePath);
+  await store.load();
+  if (store.has(eventId)) {
+    return false;
+  }
+
+  const claimPath = buildClaimFilePath(stateFilePath, "event", eventId);
+  await fs.mkdir(path.dirname(claimPath), { recursive: true });
+  try {
+    await fs.writeFile(claimPath, `${eventId}\n`, { encoding: "utf8", flag: "wx" });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export async function evaluateQuotaAlertsInStateFile(
+  stateFilePath: string,
+  snapshot: BalanceSnapshot,
+  trigger: QuotaAlertTriggerConfig
+): Promise<StoredQuotaAlertEvaluation> {
+  return withStoreLock(stateFilePath, async () => {
+    const store = new ProcessedEventStore(stateFilePath);
+    await store.load();
+    const evaluation = evaluateQuotaAlerts(snapshot, trigger, store.listQuotaAlertStates());
+    if (evaluation.changed) {
+      store.replaceQuotaAlertStates(evaluation.activeStates);
+      await store.save();
+    }
+
+    return evaluation;
+  });
+}
+
+async function withStoreLock<T>(
+  stateFilePath: string,
+  action: () => Promise<T>
+): Promise<T> {
+  const lockPath = `${stateFilePath}.lock`;
+  const startedAt = Date.now();
+
+  while (true) {
+    try {
+      await fs.mkdir(lockPath, { recursive: false });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+
+      await removeStaleStoreLock(lockPath);
+      if (Date.now() - startedAt > STORE_LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for state lock: ${lockPath}`);
+      }
+
+      await delay(25);
+    }
+  }
+
+  try {
+    return await action();
+  } finally {
+    await fs.rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function removeStaleStoreLock(lockPath: string): Promise<void> {
+  try {
+    const stat = await fs.stat(lockPath);
+    if (Date.now() - stat.mtimeMs > STORE_LOCK_STALE_MS) {
+      await fs.rm(lockPath, { recursive: true, force: true });
+    }
+  } catch {
+    // The lock may disappear between mkdir attempts.
+  }
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeBalanceAccountKey(accountKey?: string): string {
+  const normalized = accountKey?.trim();
+  if (normalized) {
+    return normalized;
+  }
+
+  return "default";
+}
+
+function normalizeBalanceSnapshotRecord(snapshot: BalanceSnapshot, accountKey: string): BalanceSnapshot {
+  return {
+    ...cloneBalanceSnapshot(snapshot),
+    accountKey
+  };
+}
+
+function buildClaimFilePath(stateFilePath: string, namespace: string, claimKey: string): string {
+  const digest = createHash("sha256").update(claimKey).digest("hex");
+  return path.join(`${stateFilePath}.claims`, `${namespace}-${digest}.claim`);
+}
+
+function cloneBalanceSnapshot(snapshot: BalanceSnapshot): BalanceSnapshot {
+  return {
+    ...snapshot,
+    primary: snapshot.primary ? { ...snapshot.primary } : undefined,
+    secondary: snapshot.secondary ? { ...snapshot.secondary } : undefined
+  };
 }

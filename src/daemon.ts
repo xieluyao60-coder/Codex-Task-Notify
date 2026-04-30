@@ -102,7 +102,7 @@ class DaemonController {
         return;
       case "check":
         if (rest[0]?.toLowerCase() === "balance") {
-          this.checkBalance();
+          await this.checkBalance();
           return;
         }
         this.logger.warn(`Unknown command: ${trimmed}`);
@@ -155,8 +155,8 @@ class DaemonController {
     this.logger.info("Monitoring restarted.");
   }
 
-  private checkBalance(): void {
-    const snapshot = this.runtime.getLatestBalanceSnapshot();
+  private async checkBalance(): Promise<void> {
+    const snapshot = await this.runtime.refreshLatestBalanceSnapshotFromStore();
     this.logger.info(formatBalanceDetails(snapshot));
   }
 

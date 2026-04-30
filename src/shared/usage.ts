@@ -36,6 +36,37 @@ export function parseUsageEventMessage(
   };
 }
 
+export function extractLatestBalanceSnapshotFromJsonlText(text: string): BalanceSnapshot | undefined {
+  const lines = text.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line) {
+      continue;
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (parsed?.type !== "event_msg") {
+      continue;
+    }
+
+    const usageEvent = parseUsageEventMessage(
+      parsed.payload,
+      typeof parsed.timestamp === "string" ? parsed.timestamp : undefined
+    );
+    if (usageEvent?.balanceSnapshot) {
+      return usageEvent.balanceSnapshot;
+    }
+  }
+
+  return undefined;
+}
+
 export function accumulateTaskResourceUsage(
   current: TaskResourceUsage | undefined,
   delta: TaskResourceUsage | undefined

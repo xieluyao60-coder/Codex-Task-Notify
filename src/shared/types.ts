@@ -22,7 +22,7 @@ export interface TurnState {
 
 export interface FileTracker {
   filePath: string;
-  offset: number;
+  offsetBytes: number;
   remainder: string;
   lastKnownSize: number;
   lastKnownMtimeMs: number;
@@ -71,12 +71,16 @@ export interface QuotaAlertTriggerConfig {
 }
 
 export type QuotaWindowKey = "primary" | "secondary";
+export type QuotaAlertStage = "threshold" | "zero";
 
 export interface QuotaAlertState {
   key: string;
   provider: string;
+  accountKey?: string;
+  accountLabel?: string;
   windowKey: QuotaWindowKey;
   metric: QuotaTriggerMetric;
+  stage: QuotaAlertStage;
   remainingValue: number;
   observedAt?: number;
   observedAtIso?: string;
@@ -86,8 +90,11 @@ export interface QuotaAlertEvent {
   id: string;
   key: string;
   provider: string;
+  accountKey?: string;
+  accountLabel?: string;
   windowKey: QuotaWindowKey;
   metric: QuotaTriggerMetric;
+  stage: QuotaAlertStage;
   remainingValue: number;
   observedAt?: number;
   observedAtIso?: string;
@@ -101,6 +108,10 @@ export interface NotifyConfig {
   hotPollIntervalMs: number;
   hotSessionIdleMs: number;
   allowedSources: string[];
+  vscode: {
+    idePopupEnabled: boolean;
+    maxRecentEvents: number;
+  };
   desktop: {
     enabled: boolean;
     sound: boolean;
@@ -139,6 +150,11 @@ export interface BalanceWindowSnapshot {
 
 export interface BalanceSnapshot {
   provider: string;
+  accountKey?: string;
+  accountLabel?: string;
+  accountId?: string;
+  accountEmail?: string;
+  authMode?: string;
   observedAt?: number;
   observedAtIso?: string;
   limitId?: string;
@@ -148,6 +164,16 @@ export interface BalanceSnapshot {
   rateLimitReachedType?: string | null;
   primary?: BalanceWindowSnapshot;
   secondary?: BalanceWindowSnapshot;
+}
+
+export interface AccountIdentity {
+  provider: string;
+  accountKey: string;
+  accountLabel?: string;
+  accountId?: string;
+  accountEmail?: string;
+  authMode?: string;
+  planType?: string | null;
 }
 
 export interface NormalizedNotificationEvent {
@@ -233,3 +259,111 @@ export interface RecentManualHotSessionView {
   manualLabel?: string;
   projectName?: string;
 }
+
+export type DaemonSurface = "vscode" | "cli";
+
+export interface DeliveryWaySnapshot {
+  idePopupEnabled: boolean;
+  desktopEnabled: boolean;
+  barkEnabled: boolean;
+}
+
+export interface DaemonRuntimeMetadata {
+  surface: DaemonSurface;
+  protocolVersion: number;
+  pipeName: string;
+  pid: number;
+  startedAt: number;
+  startedAtIso: string;
+  lastHeartbeat: number;
+  lastHeartbeatIso: string;
+  clientCount: number;
+  running: boolean;
+}
+
+export interface DaemonStatusSnapshot {
+  surface: DaemonSurface;
+  protocolVersion: number;
+  running: boolean;
+  clientCount: number;
+  startedAt: number;
+  startedAtIso: string;
+  lastHeartbeat: number;
+  lastHeartbeatIso: string;
+  deliveryWays: DeliveryWaySnapshot;
+  latestBalanceSnapshot?: BalanceSnapshot;
+  quotaAlertTrigger: QuotaAlertTriggerConfig;
+  recentEvents: NormalizedNotificationEvent[];
+  hotSessions: HotSessionSnapshot[];
+}
+
+export interface RuntimeTaskCompletedEvent {
+  event: NormalizedNotificationEvent;
+  hadManualAlias: boolean;
+}
+
+export type RuntimeEventType = "task_completed" | "quota_alert" | "state_changed";
+
+export interface RuntimeEventEnvelope {
+  type: RuntimeEventType;
+  payload: RuntimeTaskCompletedEvent | QuotaAlertEvent | DaemonStatusSnapshot;
+}
+
+export type RpcMethod =
+  | "ping"
+  | "getStatus"
+  | "startMonitoring"
+  | "stopMonitoring"
+  | "restartMonitoring"
+  | "getBalance"
+  | "refreshBalance"
+  | "getQuotaTrigger"
+  | "setQuotaTrigger"
+  | "chooseDeliveryWays"
+  | "addSessionFile"
+  | "listHotSessions"
+  | "listRecentManualHotSessions"
+  | "listRenameCandidates"
+  | "renameSessionLabel"
+  | "clearManualSessionLabels"
+  | "getRecentEvents"
+  | "subscribeEvents";
+
+export interface ClientHello {
+  type: "hello";
+  protocolVersion: number;
+  surface: DaemonSurface;
+  clientId: string;
+}
+
+export interface RpcRequest {
+  type: "request";
+  id: string;
+  method: RpcMethod;
+  params?: Record<string, unknown>;
+}
+
+export interface RpcSuccessResponse {
+  type: "response";
+  id: string;
+  ok: true;
+  result?: unknown;
+}
+
+export interface RpcErrorResponse {
+  type: "response";
+  id: string;
+  ok: false;
+  error: {
+    message: string;
+  };
+}
+
+export interface EventPushMessage {
+  type: "event";
+  event: RuntimeEventEnvelope;
+}
+
+export type RpcResponse = RpcSuccessResponse | RpcErrorResponse;
+export type DaemonClientMessage = ClientHello | RpcRequest;
+export type DaemonServerMessage = RpcResponse | EventPushMessage;

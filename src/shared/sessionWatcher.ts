@@ -159,7 +159,7 @@ export class CodexSessionWatcher {
   public async replayFile(filePath: string): Promise<NormalizedNotificationEvent[]> {
     const resolved = path.resolve(filePath);
     const tracker = this.getOrCreateTracker(resolved);
-    tracker.offset = 0;
+    tracker.offsetBytes = 0;
     tracker.remainder = "";
     tracker.lastKnownSize = 0;
     tracker.lastKnownMtimeMs = 0;
@@ -235,8 +235,28 @@ export class CodexSessionWatcher {
         continue;
       }
 
-      await this.registerUnarchivedSessionFile(filePath, false);
+      await this.indexExistingSessionFile(filePath);
     }
+  }
+
+  private async indexExistingSessionFile(filePath: string): Promise<string> {
+    const resolved = path.resolve(filePath);
+    const stat = await fs.stat(resolved);
+    const tracker = this.getOrCreateTracker(resolved);
+    tracker.offsetBytes = stat.size;
+    tracker.remainder = "";
+    tracker.lastKnownSize = stat.size;
+    tracker.lastKnownMtimeMs = stat.mtimeMs;
+
+    const sessionId = await this.resolveSessionId(resolved);
+    this.bindSessionFile(resolved, sessionId);
+    this.coldSessions.set(resolved, {
+      filePath: resolved,
+      addedAtMs: Date.now(),
+      lastColdCheckedAtMs: Date.now()
+    });
+    this.store.markSessionUnarchived(sessionId, resolved);
+    return sessionId;
   }
 
   private async registerUnarchivedSessionFile(filePath: string, emitNotifications: boolean): Promise<string> {
@@ -641,7 +661,7 @@ export class CodexSessionWatcher {
 
     const tracker: FileTracker = {
       filePath,
-      offset: 0,
+      offsetBytes: 0,
       remainder: "",
       lastKnownSize: 0,
       lastKnownMtimeMs: 0,
@@ -724,15 +744,14 @@ export class CodexSessionWatcher {
     const resolved = path.resolve(filePath);
     const tracker = this.getOrCreateTracker(resolved);
     const stat = await fs.stat(resolved);
-    const text = await fs.readFile(resolved, "utf8");
 
-    if (text.length < tracker.offset) {
-      tracker.offset = 0;
+    if (stat.size < tracker.offsetBytes) {
+      tracker.offsetBytes = 0;
       tracker.remainder = "";
     }
 
-    const chunk = text.slice(tracker.offset);
-    tracker.offset = text.length;
+    const chunk = await this.readAppendedText(resolved, tracker.offsetBytes, stat.size);
+    tracker.offsetBytes = stat.size;
     tracker.lastKnownSize = stat.size;
     tracker.lastKnownMtimeMs = stat.mtimeMs;
 
@@ -1139,7 +1158,7 @@ export class CodexSessionWatcher {
 
   private async readSessionIdFromFile(filePath: string): Promise<string | undefined> {
     try {
-      const content = await fs.readFile(filePath, "utf8");
+      const content = await this.readFileHead(filePath);
       for (const line of content.split(/\r?\n/, 20)) {
         if (line.trim().length === 0) {
           continue;
@@ -1161,6 +1180,62 @@ export class CodexSessionWatcher {
     }
 
     return undefined;
+  }
+
+  private async readFileHead(filePath: string, maxBytes: number = 16 * 1024): Promise<string> {
+    const fileHandle = await fs.open(filePath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(maxBytes);
+      const { bytesRead } = await fileHandle.read(buffer, 0, maxBytes, 0);
+      if (bytesRead <= 0) {
+        return "";
+      }
+
+      return buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await fileHandle.close();
+    }
+  }
+
+  private async readAppendedText(
+    filePath: string,
+    offsetBytes: number,
+    fileSizeBytes?: number
+  ): Promise<string> {
+    const targetSize = fileSizeBytes ?? (await fs.stat(filePath)).size;
+    if (targetSize <= offsetBytes) {
+      return "";
+    }
+
+    const remainingBytes = targetSize - offsetBytes;
+    const fileHandle = await fs.open(filePath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(remainingBytes);
+      let totalBytesRead = 0;
+
+      while (totalBytesRead < remainingBytes) {
+        const { bytesRead } = await fileHandle.read(
+          buffer,
+          totalBytesRead,
+          remainingBytes - totalBytesRead,
+          offsetBytes + totalBytesRead
+        );
+
+        if (bytesRead <= 0) {
+          break;
+        }
+
+        totalBytesRead += bytesRead;
+      }
+
+      if (totalBytesRead <= 0) {
+        return "";
+      }
+
+      return buffer.subarray(0, totalBytesRead).toString("utf8");
+    } finally {
+      await fileHandle.close();
+    }
   }
 
   private getTodaySessionDirectory(date: Date = new Date()): string {

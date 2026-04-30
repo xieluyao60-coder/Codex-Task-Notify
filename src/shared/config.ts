@@ -30,6 +30,10 @@ const DEFAULT_CONFIG: NotifyConfig = {
   hotPollIntervalMs: 5000,
   hotSessionIdleMs: 2 * 60 * 60 * 1000,
   allowedSources: [],
+  vscode: {
+    idePopupEnabled: true,
+    maxRecentEvents: 20
+  },
   desktop: {
     enabled: true,
     sound: false
@@ -60,6 +64,11 @@ const DEFAULT_CONFIG: NotifyConfig = {
 export function getDefaultConfigPath(): string {
   loadDotEnvIntoProcess();
   return process.env.CODEX_TASK_NOTIFY_CONFIG ?? DEFAULT_CONFIG_PATH;
+}
+
+export function getDefaultConfigDir(): string {
+  loadDotEnvIntoProcess();
+  return DEFAULT_CONFIG_DIR;
 }
 
 export function getDefaultConfig(): NotifyConfig {
@@ -155,6 +164,17 @@ function mergeConfig(input: Partial<NotifyConfig>): NotifyConfig {
 
   if (Array.isArray(input.allowedSources)) {
     config.allowedSources = input.allowedSources.filter((value): value is string => typeof value === "string");
+  }
+
+  if (input.vscode) {
+    config.vscode.idePopupEnabled = Boolean(input.vscode.idePopupEnabled ?? config.vscode.idePopupEnabled);
+    if (
+      typeof input.vscode.maxRecentEvents === "number" &&
+      Number.isFinite(input.vscode.maxRecentEvents) &&
+      input.vscode.maxRecentEvents >= 5
+    ) {
+      config.vscode.maxRecentEvents = Math.floor(input.vscode.maxRecentEvents);
+    }
   }
 
   if (input.desktop) {
@@ -295,8 +315,11 @@ function loadDotEnvIntoProcess(): void {
 
 function resolveEnvFileCandidates(): string[] {
   const explicitPath = process.env.CODEX_TASK_NOTIFY_ENV;
+  if (explicitPath && explicitPath.trim().length > 0) {
+    return [path.resolve(expandUserPath(explicitPath.trim()))];
+  }
+
   const candidates = [
-    explicitPath ? path.resolve(expandUserPath(explicitPath)) : undefined,
     path.resolve(process.cwd(), ".env"),
     path.resolve(__dirname, "..", "..", ".env"),
     path.resolve(__dirname, "..", ".env"),

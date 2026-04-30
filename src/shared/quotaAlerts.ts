@@ -1,4 +1,5 @@
 import {
+  QuotaAlertStage,
   BalanceSnapshot,
   BalanceWindowSnapshot,
   QuotaAlertEvent,
@@ -52,23 +53,26 @@ export function evaluateQuotaAlerts(
 
     const remainingValue = toRemainingPercent(window.usedPercent);
     const thresholdValue = spec.readTriggerValue(trigger);
-    const key = buildQuotaAlertKey(snapshot.provider, spec.key, "remaining_percent");
+    const key = buildQuotaAlertKey(snapshot.provider, snapshot.accountKey, spec.key, "remaining_percent");
     const existing = activeStates.get(key);
-    const shouldAlert = remainingValue <= thresholdValue;
+    const nextStage = resolveQuotaAlertStage(remainingValue, thresholdValue);
 
-    if (shouldAlert) {
-      if (!existing) {
+    if (nextStage) {
+      if (!existing || existing.stage !== nextStage) {
         const nextState: QuotaAlertState = {
           key,
           provider: snapshot.provider,
+          accountKey: snapshot.accountKey,
+          accountLabel: snapshot.accountLabel,
           windowKey: spec.key,
           metric: "remaining_percent",
+          stage: nextStage,
           remainingValue,
           observedAt: snapshot.observedAt,
           observedAtIso: snapshot.observedAtIso
         };
         alerts.push({
-          id: buildQuotaAlertId(key, snapshot.observedAtIso, snapshot.observedAt),
+          id: buildQuotaAlertId(key, nextStage, snapshot.observedAtIso, snapshot.observedAt),
           ...nextState
         });
         activeStates.set(key, nextState);
@@ -108,16 +112,37 @@ export function quotaWindowLabel(windowKey: QuotaWindowKey): "5h" | "7d" {
 
 function buildQuotaAlertKey(
   provider: string,
+  accountKey: string | undefined,
   windowKey: QuotaWindowKey,
   metric: QuotaAlertState["metric"]
 ): string {
-  return `${provider}:${windowKey}:${metric}`;
+  return `${provider}:${accountKey?.trim() || "default"}:${windowKey}:${metric}`;
 }
 
-function buildQuotaAlertId(key: string, observedAtIso?: string, observedAt?: number): string {
+function buildQuotaAlertId(
+  key: string,
+  stage: QuotaAlertStage,
+  observedAtIso?: string,
+  observedAt?: number
+): string {
   return observedAtIso?.trim()
-    ? `quota-alert:${key}:${observedAtIso.trim()}`
-    : `quota-alert:${key}:${observedAt ?? Date.now()}`;
+    ? `quota-alert:${key}:${stage}:${observedAtIso.trim()}`
+    : `quota-alert:${key}:${stage}:${observedAt ?? Date.now()}`;
+}
+
+function resolveQuotaAlertStage(
+  remainingValue: number,
+  thresholdValue: number
+): QuotaAlertStage | undefined {
+  if (remainingValue <= 0) {
+    return "zero";
+  }
+
+  if (remainingValue <= thresholdValue) {
+    return "threshold";
+  }
+
+  return undefined;
 }
 
 function toRemainingPercent(usedPercent: number): number {

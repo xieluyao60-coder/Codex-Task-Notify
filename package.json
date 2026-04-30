@@ -2,7 +2,7 @@
   "name": "agent-task-notify",
   "displayName": "Agent Task Notify",
   "description": "Unified task completion notifications for Codex sessions across IDE, CLI, and app workflows.",
-  "version": "1.6.0",
+  "version": "1.10.2",
   "publisher": "ayanami-ray",
   "icon": "assets/icons/icon.png",
   "license": "MIT",
@@ -22,12 +22,15 @@
   ],
   "activationEvents": [
     "onStartupFinished",
+    "onCommand:codexTaskNotify.toggleMonitoring",
     "onCommand:codexTaskNotify.startMonitoring",
     "onCommand:codexTaskNotify.stopMonitoring",
     "onCommand:codexTaskNotify.restartMonitoring",
     "onCommand:codexTaskNotify.continueMonitoring",
     "onCommand:codexTaskNotify.quitMonitoring",
     "onCommand:codexTaskNotify.checkBalance",
+    "onCommand:codexTaskNotify.refreshBalance",
+    "onCommand:codexTaskNotify.chooseWay",
     "onCommand:codexTaskNotify.setTrigger",
     "onCommand:codexTaskNotify.addSessionFile",
     "onCommand:codexTaskNotify.monitorActiveSession",
@@ -44,6 +47,7 @@
   "files": [
     "dist/daemon.js",
     "dist/extension.js",
+    "dist/vscodeDaemon.js",
     "dist/shared/**/*.js",
     "node_modules/growly/**",
     "node_modules/is-docker/**",
@@ -63,6 +67,10 @@
   },
   "contributes": {
     "commands": [
+      {
+        "command": "codexTaskNotify.toggleMonitoring",
+        "title": "Codex Task Notify: Toggle Monitoring"
+      },
       {
         "command": "codexTaskNotify.startMonitoring",
         "title": "Codex Task Notify: Start Monitoring"
@@ -86,6 +94,14 @@
       {
         "command": "codexTaskNotify.checkBalance",
         "title": "Codex Task Notify: check balance"
+      },
+      {
+        "command": "codexTaskNotify.refreshBalance",
+        "title": "Codex Task Notify: refresh balance"
+      },
+      {
+        "command": "codexTaskNotify.chooseWay",
+        "title": "Codex Task Notify: choose way"
       },
       {
         "command": "codexTaskNotify.setTrigger",
@@ -139,18 +155,6 @@
           "type": "boolean",
           "default": true,
           "description": "Start monitoring Codex session files when the extension activates."
-        },
-        "codexTaskNotify.enableIdePopup": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show VS Code popup notifications in addition to desktop and webhook channels."
-        },
-        "codexTaskNotify.maxRecentEvents": {
-          "type": "number",
-          "default": 20,
-          "minimum": 5,
-          "maximum": 100,
-          "description": "Maximum number of recent notification events kept in the output log buffer."
         },
         "codexTaskNotify.promptForSessionAlias": {
           "type": "boolean",
