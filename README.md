@@ -131,12 +131,12 @@ Codex限额警告
 .
 ├─ assets/icons/           # 扩展图标、Bark 图标资源
 ├─ docs/internal/          # 本地内部文档，默认不提交
-├─ releases/vsix/          # 打包后的 VSIX
+├─ releases/vsix/          # 本地打包输出目录，VSIX 不提交
 ├─ scripts/                # 打包脚本
 ├─ src/
 │  ├─ daemon.ts            # CLI 入口
 │  ├─ extension.ts         # VS Code 扩展入口
-│  ├─ latencyProbe.ts      # 延迟探针
+│  ├─ vscodeDaemon.ts      # VS Code 后台 daemon 入口
 │  ├─ shared/
 │  │  ├─ account.ts        # 当前本机 Codex 账号识别
 │  │  ├─ bark.ts
@@ -148,9 +148,10 @@ Codex限额警告
 │  │  ├─ sessionWatcher.ts
 │  │  ├─ store.ts
 │  │  ├─ types.ts
+│  │  ├─ vscodeDaemonClient.ts
+│  │  ├─ vscodeDaemonHost.ts
 │  │  └─ usage.ts          # token / balance 归一化层
 │  └─ test/smoke.ts
-├─ tools/
 ├─ .env.example
 ├─ package.json
 └─ tsconfig.json
@@ -367,28 +368,13 @@ npm run package:vsix
 releases/vsix/
 ```
 
+`releases/vsix/*.vsix` 是本地构建产物，默认不提交到仓库。
+
 文件名格式：
 
 ```text
 codex-task-notify-{version}.vsix
 ```
-
-## 延迟调试
-
-项目内置两个辅助工具：
-
-```text
-src/latencyProbe.ts
-tools/trace-watcher-change.js
-```
-
-用于定位：
-
-- `task_complete` 写入时间
-- watcher 发现文件变化的时间
-- 最终通知发出的时间
-
-历史排查结论是：`task_complete` 本身通常写得很快，真正容易出现随机高延迟的是“新会话发现”和“文件变化发现”阶段，所以当前版本保留了 `fs.watch + 热查询补扫 + 冷热轮转` 的组合方案。
 
 ## 已知限制
 

@@ -5,6 +5,7 @@ node_modules/
 dist/
 out/
 .vscode-test/
+releases/vsix/*.vsix
 
 # Local secrets and environment overrides
 .env
@@ -33,5 +34,4 @@ AGENT_HANDOFF.md
 # OS / editor noise
 .DS_Store
 Thumbs.db
-.vscode/settings.json
-.vscode/launch.json
+.vscode/

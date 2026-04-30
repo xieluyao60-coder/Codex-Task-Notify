@@ -170,7 +170,6 @@
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true });\"",
     "smoke": "npm run build && node dist/test/smoke.js",
     "start:daemon": "npm run build && node dist/daemon.js",
-    "probe:latency": "npm run build && node dist/latencyProbe.js",
     "package:vsix": "npm run build && node scripts/package-vsix.js"
   },
   "dependencies": {
